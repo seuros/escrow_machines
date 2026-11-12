@@ -1,0 +1,21 @@
+[package]
+name = "escrow_machines_native"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+test = false
+doctest = false
+
+[dependencies]
+escrow-machines.workspace = true
+magnus.workspace = true
+rb-sys.workspace = true
+bytes.workspace = true
+
+[lints]
+workspace = true

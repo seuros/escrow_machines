@@ -1,0 +1,42 @@
+module EscrowMachines
+  VERSION: String
+  CAPACITY: Integer
+
+  type refusal = :zero_amount | :insufficient | :exceeds_spent | :unknown_replica | :self_transfer
+               | :stale_id | :id_conflict | :malformed | :forged | :config_mismatch | :diverged
+               | :overdrawn | :overflow
+
+  class Receipt < Data
+    attr_reader from: Integer
+    attr_reader to: Integer
+    attr_reader id: Integer
+    attr_reader amount: Integer
+    attr_reader total: Integer
+    def self.new: (Integer from, Integer to, Integer id, Integer amount, Integer total) -> Receipt
+                | (from: Integer, to: Integer, id: Integer, amount: Integer, total: Integer) -> Receipt
+  end
+
+  class Escrow
+    def self.new: (replica: Integer, rights: Array[Integer]) -> Escrow
+    def self.load: (String frame) -> Escrow
+    def dump: () -> String
+    def spend: (Integer amount) -> (Integer | refusal)
+    def refund: (Integer amount) -> (Integer | refusal)
+    def transfer: (to: Integer, id: Integer, amount: Integer) -> (Receipt | refusal)
+    def accept: (Receipt receipt) -> (:applied | :replayed | refusal)
+    def merge: (Escrow other) -> (true | refusal)
+    def recover: (Escrow other) -> (true | refusal)
+    def replica: () -> Integer
+    def replicas: () -> Integer
+    def capacity: () -> Integer
+    def supply: () -> Integer
+    def available: () -> Integer
+    def allotted: (Integer replica) -> Integer?
+    def balance: (Integer replica) -> Integer?
+    def spent: (Integer replica) -> Integer?
+    def refunded: (Integer replica) -> Integer?
+    def outstanding: (Integer replica) -> Integer?
+    def granted: (Integer from, Integer to) -> Integer?
+    def last_transfer: (Integer from, Integer to) -> [Integer, Integer]?
+  end
+end
