@@ -37,4 +37,8 @@ Contracts the caller owns:
 - **Membership.** The replica set and allotment are fixed at construction and
   must be identical on every replica.
 
+The Ruby gem mirrors `Receipt` and `Mark` as `Data` values of the same names,
+and `Transfer` as one `Data` per variant, `Transfer::Applied` and
+`Transfer::Replayed`, each carrying the `receipt`.
+
 Initial, unstable API. No clock, I/O, hashing, or randomness.

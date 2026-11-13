@@ -1,7 +1,7 @@
 //! What a replica does with its own rights: spend, refund, transfer, accept.
 
 use crate::{Accepted, Escrow, Mark, Receipt, Refusal, Transfer};
-use merge_machines::ReplicaId;
+use merge_machines::{CapacityError, ReplicaId};
 
 impl<const N: usize> Escrow<N> {
     /// Spends `amount` of the local replica's rights and returns what it has
@@ -28,7 +28,7 @@ impl<const N: usize> Escrow<N> {
             .ok_or(Refusal::Overflow)?;
         self.spent
             .increment(local, amount)
-            .map_err(|_| Refusal::Overflow)?;
+            .map_err(|CapacityError| Refusal::Overflow)?;
         Ok(available - amount)
     }
 
@@ -59,7 +59,7 @@ impl<const N: usize> Escrow<N> {
             .ok_or(Refusal::Overflow)?;
         self.refunded
             .increment(local, amount)
-            .map_err(|_| Refusal::Overflow)?;
+            .map_err(|CapacityError| Refusal::Overflow)?;
         Ok(self.available())
     }
 
@@ -114,7 +114,7 @@ impl<const N: usize> Escrow<N> {
         let total = granted.checked_add(amount).ok_or(Refusal::Overflow)?;
         self.grants[self.local]
             .increment(to, amount)
-            .map_err(|_| Refusal::Overflow)?;
+            .map_err(|CapacityError| Refusal::Overflow)?;
         self.marks[self.local][slot] = Some(Mark { id, amount });
         Ok(Transfer::Applied(Receipt {
             from,
@@ -186,7 +186,7 @@ impl<const N: usize> Escrow<N> {
         }
         self.grants[from]
             .increment(receipt.to, raise)
-            .map_err(|_| Refusal::Overflow)?;
+            .map_err(|CapacityError| Refusal::Overflow)?;
         self.marks[from][to] = Some(Mark {
             id: receipt.id,
             amount: receipt.amount,

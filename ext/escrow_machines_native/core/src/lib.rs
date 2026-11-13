@@ -134,6 +134,38 @@ pub enum Refusal {
     Overflow,
 }
 
+impl core::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ZeroAmount => f.write_str("the amount is zero"),
+            Self::Insufficient { available } => {
+                write!(f, "the local replica holds only {available}")
+            }
+            Self::ExceedsSpent { outstanding } => {
+                write!(f, "only {outstanding} is spent and not refunded")
+            }
+            Self::UnknownReplica => f.write_str("the replica is outside the configured set"),
+            Self::SelfTransfer => f.write_str("the transfer names one replica on both ends"),
+            Self::StaleId { latest } => {
+                write!(f, "the latest transfer id for the pair is {latest}")
+            }
+            Self::IdConflict { amount } => write!(f, "the id already moved {amount}"),
+            Self::Malformed => f.write_str("the receipt contradicts itself or its history"),
+            Self::Forged => f.write_str("the receipt claims a grant the local replica never made"),
+            Self::ConfigMismatch => f.write_str("the other state has another allotment"),
+            Self::Diverged => {
+                f.write_str("the other state knows more of the local replica's cells")
+            }
+            Self::Overdrawn => {
+                f.write_str("the adopted history leaves the local replica below zero")
+            }
+            Self::Overflow => f.write_str("a counter or the balance would pass u64::MAX"),
+        }
+    }
+}
+
+impl core::error::Error for Refusal {}
+
 /// Why an escrow could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {

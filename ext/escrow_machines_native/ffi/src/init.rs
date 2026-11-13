@@ -1,5 +1,5 @@
 //! Private native entry point.
-use crate::{CAPACITY, Wrapper};
+use crate::{CAPACITY, Core, Wrapper};
 use magnus::{Error, Ruby, function, method, prelude::*};
 
 #[magnus::init]
@@ -8,16 +8,17 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     module.const_set("CAPACITY", CAPACITY)?;
     let class = module.define_class("Escrow", ruby.class_object())?;
     class.undef_default_alloc_func();
-    class.define_singleton_method("new", function!(Wrapper::new, -1))?;
-    class.define_singleton_method("load", function!(Wrapper::load, 1))?;
-    class.define_method("dump", method!(Wrapper::dump, 0))?;
+    class.const_set("ENCODED_LEN", Core::ENCODED_LEN)?;
+    class.define_singleton_method("new", function!(Wrapper::new, 2))?;
+    class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
+    class.define_method("encode", method!(Wrapper::encode, 0))?;
     class.define_method("spend", method!(Wrapper::spend, 1))?;
     class.define_method("refund", method!(Wrapper::refund, 1))?;
-    class.define_method("transfer", method!(Wrapper::transfer, -1))?;
+    class.define_method("transfer", method!(Wrapper::transfer, 3))?;
     class.define_method("accept", method!(Wrapper::accept, 1))?;
     class.define_method("merge", method!(Wrapper::merge, 1))?;
     class.define_method("recover", method!(Wrapper::recover, 1))?;
-    class.define_method("replica", method!(Wrapper::replica, 0))?;
+    class.define_method("local", method!(Wrapper::local, 0))?;
     class.define_method("replicas", method!(Wrapper::replicas, 0))?;
     class.define_method("capacity", method!(Wrapper::capacity, 0))?;
     class.define_method("supply", method!(Wrapper::supply, 0))?;

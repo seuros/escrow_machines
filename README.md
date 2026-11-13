@@ -12,20 +12,20 @@ gem 'escrow_machines'
 
 ```ruby
 # 100 seats, three regions. Every region builds the same allotment.
-paris = EscrowMachines::Escrow.new(replica: 0, rights: [60, 30, 10])
-tokyo = EscrowMachines::Escrow.new(replica: 2, rights: [60, 30, 10])
+paris = EscrowMachines::Escrow.new(0, [60, 30, 10])
+tokyo = EscrowMachines::Escrow.new(2, [60, 30, 10])
 
 tokyo.spend(8)    # => 2, seats left in Tokyo
 tokyo.spend(5)    # => :insufficient. Paris has 60. Tokyo has 2.
 
-receipt = paris.transfer(to: 2, id: 1, amount: 20)
-save(paris.dump)                # persist before the receipt leaves the building
+receipt = paris.transfer(2, 1, 20).receipt
+save(paris.encode)              # persist before the receipt leaves the building
 tokyo.accept(receipt)           # => :applied
 tokyo.accept(receipt)           # => :replayed, the relay stuttered
 tokyo.spend(5)                  # => 17
 ```
 
-One escrow per replica. Amounts, replica indexes and transfer ids are Integers. No clock, no network, no storage: you bring those.
+One escrow per replica. `Escrow.new` takes what the core's constructor takes, in its order: `local`, the index of this replica, and `allotted`, every replica's starting rights. `transfer` takes `to`, `id` and `amount`. Amounts, replica indexes and transfer ids are Integers. No clock, no network, no storage: you bring those.
 
 ## A Message to the Resistance
 
@@ -80,12 +80,12 @@ sequenceDiagram
     participant D as Paris disk
 
     T->>P: need 20, transfer id 1
-    P->>P: transfer(to: 2, id: 1, amount: 20)
-    P->>D: dump
+    P->>P: transfer(2, 1, 20)
+    P->>D: encode
     P-->>T: Receipt (lost in the relay)
 
     T->>P: need 20, transfer id 1 (retry)
-    P->>P: transfer(to: 2, id: 1, amount: 20)
+    P->>P: transfer(2, 1, 20)
     Note over P: same id, same Receipt, nothing moves twice
     P-->>T: Receipt
     P-->>T: Receipt (the relay finds the first one)
@@ -100,7 +100,7 @@ sequenceDiagram
 ### Spend
 
 ```ruby
-escrow = EscrowMachines::Escrow.new(replica: 0, rights: [10, 5])
+escrow = EscrowMachines::Escrow.new(0, [10, 5])
 
 escrow.spend(7)     # => 3, what this replica has left
 escrow.spend(4)     # => :insufficient
@@ -122,20 +122,29 @@ A refund returns rights this replica spent. It can't return more than that, beca
 ### Transfer
 
 ```ruby
-left  = EscrowMachines::Escrow.new(replica: 0, rights: [10, 0])
-right = EscrowMachines::Escrow.new(replica: 1, rights: [10, 0])
+left  = EscrowMachines::Escrow.new(0, [10, 0])
+right = EscrowMachines::Escrow.new(1, [10, 0])
 
-receipt = left.transfer(to: 1, id: 1, amount: 4)
+transfer = left.transfer(1, 1, 4)
+transfer           # => #<data EscrowMachines::Transfer::Applied receipt=...>
+receipt = transfer.receipt
 receipt   # => #<data EscrowMachines::Receipt from=0, to=1, id=1, amount=4, total=4>
 left.available                          # => 6, deducted now
 
-left.transfer(to: 1, id: 1, amount: 4)  # => the same Receipt. Nothing moved again.
-left.transfer(to: 1, id: 1, amount: 9)  # => :id_conflict
-left.transfer(to: 1, id: 0, amount: 4)  # => :stale_id
-left.transfer(to: 1, id: 2, amount: 7)  # => :insufficient
+again = left.transfer(1, 1, 4)
+again.class                             # => EscrowMachines::Transfer::Replayed. Nothing moved again.
+again.receipt == receipt                # => true, the same Receipt
+left.transfer(1, 1, 9)  # => :id_conflict
+left.transfer(1, 0, 4)  # => :stale_id
+left.transfer(1, 2, 7)  # => :insufficient
 ```
 
-You choose the id. It has to go up for each destination, and a retry reuses the one it's retrying. The latest id is answered with its original receipt for as long as it stays the latest. Anything older is `:stale_id`: refused, not repeated.
+`transfer` answers the core's `Transfer`: a `Transfer::Applied` when the rights moved now, a `Transfer::Replayed` when this id had already moved them. Both carry the `receipt` to deliver, so `transfer.receipt` works either way. You choose the id. It has to go up for each destination, and a retry reuses the one it's retrying. The latest id is answered `Transfer::Replayed` with its original receipt for as long as it stays the latest. Anything older is `:stale_id`: refused, not repeated.
+
+```ruby
+left.last_transfer(0, 1)   # => #<data EscrowMachines::Mark id=1, amount=4>
+left.last_transfer(1, 0)   # => nil, nothing has gone that way
+```
 
 ### Accept
 
@@ -151,7 +160,7 @@ A receipt says how much `from` has granted `to` in total, not "add four". Delive
 
 ```ruby
 right.spend(1)
-left.merge(right)       # => true
+left.merge(right)       # => :merged
 left.balance(1)         # => 3, what left now believes right holds
 left.available          # => 6, still only its own
 ```
@@ -161,16 +170,16 @@ left.available          # => 6, still only its own
 ### Persist, and what happens when you didn't
 
 ```ruby
-frame = left.dump                             # binary String, fixed length
-left  = EscrowMachines::Escrow.load(frame)    # ArgumentError if it isn't a sane frame
+frame = left.encode                             # binary String, Escrow::ENCODED_LEN bytes
+left  = EscrowMachines::Escrow.decode(frame)    # ArgumentError if it isn't a sane frame
 ```
 
 A replica that restarts from an old frame has forgotten spends it already made. The first peer that remembers them proves it:
 
 ```ruby
-stale = EscrowMachines::Escrow.load(old_frame)
+stale = EscrowMachines::Escrow.decode(old_frame)
 stale.merge(right)      # => :diverged, and stale is untouched
-stale.recover(right)    # => true, adopts what right saw of it
+stale.recover(right)    # => :recovered, adopts what right saw of it
                         # => :overdrawn if the two histories can't both be true
 ```
 
@@ -180,15 +189,28 @@ stale.recover(right)    # => true, adopts what right saw of it
 
 ```ruby
 EscrowMachines::CAPACITY                                     # => 8
-EscrowMachines::Escrow.new(replica: 0, rights: [1] * 9)      # RangeError
+EscrowMachines::Escrow.new(0, [1] * 9)      # RangeError
 ```
 
 Up to eight replicas, fixed when you build the escrow. The set doesn't grow, shrink, or rename itself afterwards.
 
+### What each verb can answer
+
+| Verb | Honoured | Refusals |
+| --- | --- | --- |
+| `spend` | the Integer left | `:zero_amount`, `:insufficient`, `:overflow` |
+| `refund` | the Integer now held | `:zero_amount`, `:exceeds_spent`, `:overflow` |
+| `transfer` | a `Transfer::Applied`, or the repeat `Transfer::Replayed` | `:zero_amount`, `:unknown_replica`, `:self_transfer`, `:stale_id`, `:id_conflict`, `:insufficient`, `:overflow` |
+| `accept` | `:applied`, or the repeat `:replayed` | `:unknown_replica`, `:self_transfer`, `:malformed`, `:id_conflict`, `:forged`, `:overflow` |
+| `merge` | `:merged` | `:config_mismatch`, `:diverged`, `:overflow` |
+| `recover` | `:recovered` | `:config_mismatch`, `:diverged`, `:overdrawn`, `:overflow` |
+
+`Receipt`, `Mark`, `Transfer::Applied` and `Transfer::Replayed` are frozen `Data` values with the fields of the core types they are named after. Method names are the core's: `local`, `replicas`, `supply`, `allotted`, `available`, `balance`, `spent`, `refunded`, `outstanding`, `granted`, `last_transfer`, `encode`, `decode`. The thirteen refusal symbols are the thirteen variants of the core's `Refusal`, each reachable; there is no catch-all. Four of them carry a number in the core (`Insufficient { available }`, `ExceedsSpent { outstanding }`, `StaleId { latest }`, `IdConflict { amount }`); a refusal in Ruby is a bare symbol, and the same numbers are what `available`, `outstanding(local)` and `last_transfer(local, to)` answer.
+
 ## The Rules of the Escort
 
 - **Everything is an Integer** in `0..2**64-1`: amounts, replica indexes, ids. Floats, nil and strings raise `TypeError`. Out of range raises `RangeError`. So does an allotment that adds up past `2**64-1`.
-- **Same allotment everywhere.** Every replica is built from the same `rights:` array. Views built from different ones answer `:config_mismatch` and don't merge.
+- **Same allotment everywhere.** Every replica is built from the same `allotted` array. Views built from different ones answer `:config_mismatch` and don't merge.
 - **Refusals don't raise.** `:insufficient`, `:exceeds_spent`, `:zero_amount`, `:unknown_replica`, `:self_transfer`, `:stale_id`, `:id_conflict`, `:malformed`, `:forged`, `:config_mismatch`, `:diverged`, `:overdrawn` and `:overflow` are answers. A refused call leaves the escrow exactly as it was.
 - **Counters are lifetime totals.** Grants and spends only count up. A pair that has moved `2**64-1` rights between them over the years answers `:overflow` instead of wrapping.
 - **Frozen means frozen.** `freeze` the escrow and `spend`, `refund`, `transfer`, `accept`, `merge` and `recover` raise `FrozenError`.
@@ -209,7 +231,7 @@ The id is the transfer's name. A retry is the same transfer, so it has the same 
 
 This is an early release of a policy core. The API will change. It decides; it doesn't run anything.
 
-**Durable replica identity is yours.** `dump` the escrow and get it onto disk before you act on a successful `spend`, `refund` or `transfer`, and before a receipt leaves the process. A replica that comes back from an older frame under the same index can spend the same rights twice, and `:diverged` only tells you after a peer notices. Never run two live processes as the same replica.
+**Durable replica identity is yours.** `encode` the escrow and get it onto disk before you act on a successful `spend`, `refund` or `transfer`, and before a receipt leaves the process. A replica that comes back from an older frame under the same index can spend the same rights twice, and `:diverged` only tells you after a peer notices. Never run two live processes as the same replica.
 
 **Transfer ids are yours.** Per destination, strictly increasing, reused on retry. Only the latest id for a pair replays; keep your retries ahead of your next request.
 

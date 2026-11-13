@@ -1,7 +1,7 @@
 //! Joining two replicas' views.
 
 use crate::{Escrow, Refusal};
-use merge_machines::{Merge, ReplicaId};
+use merge_machines::{CapacityError, Merge, ReplicaId};
 
 impl<const N: usize> Escrow<N> {
     /// Folds another replica's view into this one. Commutative, associative
@@ -49,12 +49,13 @@ impl<const N: usize> Escrow<N> {
         let mut next = *self;
         next.spent
             .merge(&other.spent)
-            .map_err(|_| Refusal::Overflow)?;
+            .map_err(|CapacityError| Refusal::Overflow)?;
         next.refunded
             .merge(&other.refunded)
-            .map_err(|_| Refusal::Overflow)?;
+            .map_err(|CapacityError| Refusal::Overflow)?;
         for (mine, theirs) in next.grants.iter_mut().zip(&other.grants) {
-            mine.merge(theirs).map_err(|_| Refusal::Overflow)?;
+            mine.merge(theirs)
+                .map_err(|CapacityError| Refusal::Overflow)?;
         }
         let pairs = next.marks.iter_mut().zip(&other.marks);
         for (mine, theirs) in pairs.flat_map(|(mine, theirs)| mine.iter_mut().zip(theirs)) {

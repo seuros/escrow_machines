@@ -2,6 +2,8 @@ module EscrowMachines
   VERSION: String
   CAPACITY: Integer
 
+  # Every refusal symbol. A refused call changed nothing. Each method below
+  # lists exactly the ones it can answer.
   type refusal = :zero_amount | :insufficient | :exceeds_spent | :unknown_replica | :self_transfer
                | :stale_id | :id_conflict | :malformed | :forged | :config_mismatch | :diverged
                | :overdrawn | :overflow
@@ -16,17 +18,67 @@ module EscrowMachines
                 | (from: Integer, to: Integer, id: Integer, amount: Integer, total: Integer) -> Receipt
   end
 
+  # Mirrors the core's `Transfer`: one `Data` per variant, each carrying the
+  # receipt to deliver.
+  module Transfer
+    class Applied < Data
+      attr_reader receipt: Receipt
+      def self.new: (Receipt receipt) -> Applied
+                  | (receipt: Receipt) -> Applied
+    end
+
+    class Replayed < Data
+      attr_reader receipt: Receipt
+      def self.new: (Receipt receipt) -> Replayed
+                  | (receipt: Receipt) -> Replayed
+    end
+  end
+
+  type transfer = Transfer::Applied | Transfer::Replayed
+
+  # Mirrors the core's `Mark`.
+  class Mark < Data
+    attr_reader id: Integer
+    attr_reader amount: Integer
+    def self.new: (Integer id, Integer amount) -> Mark
+                | (id: Integer, amount: Integer) -> Mark
+  end
+
   class Escrow
-    def self.new: (replica: Integer, rights: Array[Integer]) -> Escrow
-    def self.load: (String frame) -> Escrow
-    def dump: () -> String
-    def spend: (Integer amount) -> (Integer | refusal)
-    def refund: (Integer amount) -> (Integer | refusal)
-    def transfer: (to: Integer, id: Integer, amount: Integer) -> (Receipt | refusal)
-    def accept: (Receipt receipt) -> (:applied | :replayed | refusal)
-    def merge: (Escrow other) -> (true | refusal)
-    def recover: (Escrow other) -> (true | refusal)
-    def replica: () -> Integer
+    # Bytes of an `encode` frame.
+    ENCODED_LEN: Integer
+
+    # The arguments of the core's `Escrow::new`, in order: the local replica
+    # and every replica's starting rights. Raises RangeError when the core
+    # answers `ConfigError`: no replica, more than CAPACITY, a `local` outside
+    # `allotted`, or a supply past 2**64-1.
+    def self.new: (Integer local, Array[Integer] allotted) -> Escrow
+    # Raises ArgumentError for a frame the core cannot decode.
+    def self.decode: (String bytes) -> Escrow
+    def encode: () -> String
+    # Honoured: the rights this replica has left. Refused: :zero_amount,
+    # :insufficient, :overflow.
+    def spend: (Integer amount) -> (Integer | :zero_amount | :insufficient | :overflow)
+    # Honoured: the rights this replica now holds. Refused: :zero_amount,
+    # :exceeds_spent, :overflow.
+    def refund: (Integer amount) -> (Integer | :zero_amount | :exceeds_spent | :overflow)
+    # Honoured: a Transfer::Applied, or the repeat Transfer::Replayed. Refused:
+    # :zero_amount, :unknown_replica, :self_transfer, :stale_id, :id_conflict,
+    # :insufficient, :overflow.
+    def transfer: (Integer to, Integer id, Integer amount)
+                -> (transfer | :zero_amount | :unknown_replica | :self_transfer | :stale_id | :id_conflict
+                    | :insufficient | :overflow)
+    # Honoured: :applied, or the repeat :replayed. Refused: :unknown_replica,
+    # :self_transfer, :malformed, :id_conflict, :forged, :overflow.
+    def accept: (Receipt receipt)
+              -> (:applied | :replayed | :unknown_replica | :self_transfer | :malformed | :id_conflict | :forged
+                  | :overflow)
+    # Honoured: :merged. Refused: :config_mismatch, :diverged, :overflow.
+    def merge: (Escrow other) -> (:merged | :config_mismatch | :diverged | :overflow)
+    # Honoured: :recovered. Refused: :config_mismatch, :diverged, :overdrawn,
+    # :overflow.
+    def recover: (Escrow other) -> (:recovered | :config_mismatch | :diverged | :overdrawn | :overflow)
+    def local: () -> Integer
     def replicas: () -> Integer
     def capacity: () -> Integer
     def supply: () -> Integer
@@ -37,6 +89,6 @@ module EscrowMachines
     def refunded: (Integer replica) -> Integer?
     def outstanding: (Integer replica) -> Integer?
     def granted: (Integer from, Integer to) -> Integer?
-    def last_transfer: (Integer from, Integer to) -> [Integer, Integer]?
+    def last_transfer: (Integer from, Integer to) -> Mark?
   end
 end

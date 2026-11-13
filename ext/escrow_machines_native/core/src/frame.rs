@@ -91,7 +91,13 @@ impl Writer<'_> {
         counter
             .encode(self.slot(GCounter::<N>::ENCODED_LEN)?)
             .map(|_| ())
-            .map_err(|_| FrameError::Truncated)
+            .map_err(|error| match error {
+                // The slot is exactly one counter long, so only its length
+                // can be at fault.
+                CodecError::Truncated | CodecError::Tag | CodecError::Parameters => {
+                    FrameError::Truncated
+                }
+            })
     }
 }
 
