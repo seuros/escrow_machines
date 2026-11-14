@@ -1,6 +1,7 @@
 //! Boundaries: refusals, replays, lost state, u64 limits, frames.
 use super::{Ship, receipt};
 use crate::*;
+use matryona_machines::testing::{refuses, unchanged};
 
 #[test]
 fn spends_stop_at_the_local_share_even_when_the_fleet_holds_more() {
@@ -54,8 +55,9 @@ fn transfers_replay_by_id_and_refuse_stale_or_conflicting_ids() {
     );
     let first = receipt(0, 1, 5, 4, 4);
     assert_eq!(left.transfer(1, 5, 4), Ok(Transfer::Applied(first)));
-    assert_eq!(left.transfer(1, 5, 4), Ok(Transfer::Replayed(first)));
-    assert_eq!(left.transfer(1, 5, 4).map(|t| t.receipt()), Ok(first));
+    let replay = unchanged(&mut left, |left| left.transfer(1, 5, 4));
+    assert_eq!(replay, Ok(Transfer::Replayed(first)));
+    assert_eq!(replay.map(|t| t.receipt()), Ok(first));
     assert_eq!(left.available(), 6);
     assert_eq!(
         left.transfer(1, 5, 3),
@@ -70,14 +72,17 @@ fn transfers_replay_by_id_and_refuse_stale_or_conflicting_ids() {
     assert_eq!(left.transfer(1, 6, 2), Ok(Transfer::Applied(second)));
     // A replayed id is answered even when the balance could not pay it again.
     assert_eq!(left.spend(3), Ok(0));
-    assert_eq!(left.transfer(1, 6, 2), Ok(Transfer::Replayed(second)));
+    let replay = unchanged(&mut left, |left| left.transfer(1, 6, 2));
+    assert_eq!(replay, Ok(Transfer::Replayed(second)));
     assert_eq!(left.transfer(1, 5, 4), Err(Refusal::StaleId { latest: 6 }));
 
     // Receipts land out of order and more than once.
     assert_eq!(right.accept(&second), Ok(Accepted::Applied));
     assert_eq!(right.available(), 6);
-    assert_eq!(right.accept(&first), Ok(Accepted::Replayed));
-    assert_eq!(right.accept(&second), Ok(Accepted::Replayed));
+    for replayed in [first, second] {
+        let answer = unchanged(&mut right, |right| right.accept(&replayed));
+        assert_eq!(answer, Ok(Accepted::Replayed));
+    }
     assert_eq!(right.available(), 6);
     assert_eq!(right.granted(0, 1), Some(6));
     assert_eq!(left.accept(&second), Ok(Accepted::Replayed));
@@ -95,7 +100,6 @@ fn receipts_that_lie_are_refused_without_effect() {
     let first = left.transfer(1, 1, 3).expect("transfer").receipt();
     let second = left.transfer(1, 2, 4).expect("transfer").receipt();
     right.accept(&second).expect("accept");
-    let before = right;
     // Each lie is a receipt consistent with itself: one that is not cannot be
     // built at all (see `constructors_refuse_values_no_call_produces`).
     let cases = [
@@ -108,15 +112,12 @@ fn receipts_that_lie_are_refused_without_effect() {
         (receipt(0, 1, 1, 4, 7), Refusal::Malformed),
     ];
     for (receipt, refusal) in cases {
-        assert_eq!(right.accept(&receipt), Err(refusal), "{receipt:?}");
-        assert_eq!(right, before);
+        refuses(&mut right, refusal, |right| right.accept(&receipt));
     }
     assert_eq!(right.accept(&first), Ok(Accepted::Replayed));
     // The giver knows what it gave: a later id it never issued is a forgery.
     let forged = receipt(0, 1, 3, 1, 8);
-    let giver = left;
-    assert_eq!(left.accept(&forged), Err(Refusal::Forged));
-    assert_eq!(left, giver);
+    refuses(&mut left, Refusal::Forged, |left| left.accept(&forged));
     let mut fresh = Ship::new(0, &[10, 0]).expect("config");
     assert_eq!(fresh.accept(&first), Err(Refusal::Forged));
     // A receipt that would push the local balance past u64::MAX.
@@ -135,8 +136,7 @@ fn a_replica_that_lost_state_is_caught_by_merge_and_must_recover_explicitly() {
     right.merge(&left).expect("merge");
     // The stale generation of replica 0 comes back and meets a peer.
     let mut stale = snapshot;
-    assert_eq!(stale.merge(&right), Err(Refusal::Diverged));
-    assert_eq!(stale, snapshot);
+    refuses(&mut stale, Refusal::Diverged, |stale| stale.merge(&right));
     assert_eq!(stale.recover(&right), Ok(()));
     assert_eq!(stale, left);
 
@@ -146,21 +146,17 @@ fn a_replica_that_lost_state_is_caught_by_merge_and_must_recover_explicitly() {
     assert_eq!(stale.merge(&right), Err(Refusal::Diverged));
     // It spent again before asking: the adopted history does not add up.
     assert_eq!(stale.spend(10), Ok(0));
-    let overspent = stale;
-    assert_eq!(stale.recover(&right), Err(Refusal::Overdrawn));
-    assert_eq!(stale, overspent);
+    refuses(&mut stale, Refusal::Overdrawn, |stale| {
+        stale.recover(&right)
+    });
 
     // It reused a transfer id for a different amount.
     let mut stale = snapshot;
     let reused = stale.transfer(1, 1, 2).expect("transfer").receipt();
-    let (stale_before, right_before) = (stale, right);
-    assert_eq!(stale.recover(&right), Err(Refusal::Diverged));
-    assert_eq!(right.merge(&stale), Err(Refusal::Diverged));
-    assert_eq!(
-        right.accept(&reused),
-        Err(Refusal::IdConflict { amount: 6 })
-    );
-    assert_eq!((stale, right), (stale_before, right_before));
+    refuses(&mut stale, Refusal::Diverged, |stale| stale.recover(&right));
+    refuses(&mut right, Refusal::Diverged, |right| right.merge(&stale));
+    let conflict = Refusal::IdConflict { amount: 6 };
+    refuses(&mut right, conflict, |right| right.accept(&reused));
 
     // A peer that is merely behind is not a divergence.
     let mut behind = Ship::new(1, &[10, 5]).expect("config");
@@ -172,13 +168,15 @@ fn a_replica_that_lost_state_is_caught_by_merge_and_must_recover_explicitly() {
 #[test]
 fn views_of_another_allotment_do_not_merge() {
     let mut ship = Ship::new(0, &[10, 5]).expect("config");
-    let before = ship;
     for other in [&[10, 6][..], &[10, 5, 0], &[15]] {
         let other = Ship::new(0, other).expect("config");
-        assert_eq!(ship.merge(&other), Err(Refusal::ConfigMismatch));
-        assert_eq!(ship.recover(&other), Err(Refusal::ConfigMismatch));
+        refuses(&mut ship, Refusal::ConfigMismatch, |ship| {
+            ship.merge(&other)
+        });
+        refuses(&mut ship, Refusal::ConfigMismatch, |ship| {
+            ship.recover(&other)
+        });
     }
-    assert_eq!(ship, before);
 }
 
 #[test]
@@ -213,15 +211,11 @@ fn counters_refuse_at_u64_limits_instead_of_wrapping() {
     assert_eq!(left.accept(&back), Ok(Accepted::Applied));
     assert_eq!(left.available(), u64::MAX);
     // The lifetime grant counter for 0 -> 1 is spent even though rights remain.
-    let before = left;
-    assert_eq!(left.transfer(1, 2, 1), Err(Refusal::Overflow));
-    assert_eq!(left, before);
+    refuses(&mut left, Refusal::Overflow, |left| left.transfer(1, 2, 1));
 
     assert_eq!(left.spend(u64::MAX), Ok(0));
     assert_eq!(left.refund(u64::MAX), Ok(u64::MAX));
-    let before = left;
-    assert_eq!(left.spend(1), Err(Refusal::Overflow));
-    assert_eq!(left, before);
+    refuses(&mut left, Refusal::Overflow, |left| left.spend(1));
     assert_eq!(left.transfer(1, u64::MAX, 1), Err(Refusal::Overflow));
     right.merge(&left).expect("merge");
     assert_eq!(right.balance(0), Some(i128::from(u64::MAX)));

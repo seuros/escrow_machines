@@ -16,6 +16,7 @@ escrow-machines.workspace = true
 magnus.workspace = true
 rb-sys.workspace = true
 bytes.workspace = true
+matryona-machines = { workspace = true, features = ["ruby"] }
 
 [lints]
 workspace = true

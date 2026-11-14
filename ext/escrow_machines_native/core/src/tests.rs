@@ -1,4 +1,5 @@
 use super::*;
+use matryona_machines::testing::XorShift64 as Draws;
 
 mod edges;
 
@@ -9,22 +10,9 @@ fn receipt(from: ReplicaId, to: ReplicaId, id: u64, amount: u64, total: u64) -> 
     Receipt::new(from, to, id, amount, total).expect("a receipt consistent with itself")
 }
 
-/// Caller-supplied draws for the randomized runs.
-struct Draws(u64);
-
-impl Draws {
-    const fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-    fn below(&mut self, bound: u64) -> u64 {
-        self.next() % bound
-    }
-    fn pick(&mut self, bound: usize) -> usize {
-        usize::try_from(self.below(bound as u64)).expect("small")
-    }
+/// An index below `bound`, from the run's draws.
+fn pick(draws: &mut Draws, bound: usize) -> usize {
+    usize::try_from(draws.below(bound as u64)).expect("small")
 }
 
 /// One transfer that happened, in the order it happened.
@@ -222,7 +210,7 @@ fn check(fleet: &[Ship], model: &Model, supply: u64) {
 }
 
 fn run(seed: u64, allotted: &[u64], steps: usize) -> Vec<Ship> {
-    let mut draws = Draws(seed);
+    let mut draws = Draws::new(seed);
     let replicas = allotted.len();
     let supply: u64 = allotted.iter().sum();
     let mut model = Model::new(allotted);
@@ -231,7 +219,7 @@ fn run(seed: u64, allotted: &[u64], steps: usize) -> Vec<Ship> {
         .collect();
     let mut next_id = vec![vec![1_u64; 5]; replicas];
     for step in 0..steps {
-        let replica = draws.pick(replicas);
+        let replica = pick(&mut draws, replicas);
         let before = fleet[replica];
         let amount = draws.below(supply / 2 + 2);
         match draws.below(8) {
@@ -261,7 +249,7 @@ fn run(seed: u64, allotted: &[u64], steps: usize) -> Vec<Ship> {
             }
             3 | 4 => {
                 // One slot past the replicas, so unknown ones are drawn too.
-                let to = draws.pick(replicas + 1);
+                let to = pick(&mut draws, replicas + 1);
                 let fresh = next_id[replica][to];
                 let id = match draws.below(4) {
                     0 => fresh.saturating_sub(1),
@@ -278,13 +266,13 @@ fn run(seed: u64, allotted: &[u64], steps: usize) -> Vec<Ship> {
                 );
             }
             5 if !model.events.is_empty() => {
-                let index = draws.pick(model.events.len());
+                let index = pick(&mut draws, model.events.len());
                 let receipt = model.receipt(index);
                 let expected = model.accept(replica, index);
                 assert_eq!(fleet[replica].accept(&receipt), Ok(expected));
             }
             _ => {
-                let other = draws.pick(replicas);
+                let other = pick(&mut draws, replicas);
                 let theirs = fleet[other];
                 model.merge(replica, other);
                 assert_eq!(fleet[replica].merge(&theirs), Ok(()));
@@ -340,18 +328,18 @@ fn randomized_runs_match_the_naive_model_and_conserve_rights() {
 
 #[test]
 fn refused_calls_in_a_randomized_run_leave_the_state_untouched() {
-    let mut draws = Draws(0x5EED);
+    let mut draws = Draws::new(0x5EED);
     let mut fleet: Vec<Ship> = (0..3)
         .map(|local| Ship::new(local, &[9, 4, 2]).expect("config"))
         .collect();
     let mut refused = 0;
     for step in 0..4_000_u64 {
-        let replica = draws.pick(3);
+        let replica = pick(&mut draws, 3);
         let before = fleet[replica];
         let amount = draws.below(12);
         let to = draws.below(5);
         let id = step / 7 + draws.below(2);
-        let other = fleet[draws.pick(3)];
+        let other = fleet[pick(&mut draws, 3)];
         let failed = match draws.below(4) {
             0 => fleet[replica].spend(amount).is_err(),
             1 => fleet[replica].refund(amount).is_err(),
@@ -382,12 +370,12 @@ fn refused_calls_in_a_randomized_run_leave_the_state_untouched() {
 fn merge_is_commutative_associative_and_idempotent() {
     for seed in 1..=20 {
         // No final gossip here: stop the run early by using its mid-run views.
-        let mut draws = Draws(seed);
+        let mut draws = Draws::new(seed);
         let mut fleet: Vec<Ship> = (0..3)
             .map(|local| Ship::new(local, &[20, 20, 20]).expect("config"))
             .collect();
         for step in 0..120_u64 {
-            let replica = draws.pick(3);
+            let replica = pick(&mut draws, 3);
             let to = draws.below(3);
             match draws.below(3) {
                 0 => drop(fleet[replica].spend(draws.below(5))),

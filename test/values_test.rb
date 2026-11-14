@@ -77,6 +77,40 @@ class ValuesTest < Minitest::Test
     left = E.new(0, [10, 0]).freeze
     assert_raises(FrozenError) { left.accept(nil) }
     assert_raises(FrozenError) { left.transfer(1, 1, 4) }
+    [-> { left.spend('1') }, -> { left.refund(-1) }, -> { left.transfer(1.5, 1, 4) },
+     -> { left.merge(nil) }, -> { left.recover(:escrow) }].each do |call|
+      assert_raises(FrozenError) { call.call }
+    end
+  end
+
+  # Allotments are read as exactly an Array: a subclass is a TypeError.
+  def test_allotted_must_be_exactly_an_array
+    assert_raises(TypeError) { E.new(0, Class.new(Array).new([10, 0])) }
+    assert_equal 10, E.new(0, [10, 0].tap(&:singleton_class)).supply
+  end
+
+  # Receipt fields are read from the struct itself: a redefined reader
+  # answers nothing to the binding and is never run.
+  def test_a_redefined_reader_is_ignored
+    left, right = [0, 1].map { E.new(_1, [10, 0]) }
+    receipt = left.transfer(1, 3, 4).receipt
+    readers(Receipt, amount: -> { 10 }, total: -> { raise 'the binding ran a reader' }) do
+      assert_equal :applied, right.accept(receipt)
+    end
+    assert_equal 4, right.available
+  end
+
+  # `merge` and `recover` read exactly an Escrow. A subclass has no instance
+  # of its own (`new` builds an Escrow, the allocator is gone), and anything
+  # else is a TypeError.
+  def test_merge_and_recover_read_exactly_an_escrow
+    sub = Class.new(E)
+    assert_instance_of E, sub.new(1, [10, 0])
+    assert_raises(TypeError) { sub.allocate }
+    left = E.new(0, [10, 0])
+    assert_equal :merged, left.merge(sub.new(1, [10, 0]))
+    assert_raises(TypeError) { left.merge(Object.new) }
+    assert_raises(TypeError) { left.recover(Receipt.new(0, 1, 3, 4, 4)) }
   end
 
   # Sealing stops accidents, not reflection: Ruby binds a named subclass's
@@ -105,6 +139,15 @@ class ValuesTest < Minitest::Test
     assert_raises(RangeError) { right.accept(edited) }
     assert_raises(RangeError) { Replayed.new(edited) }
     assert_equal before, right.encode
+  end
+
+  # A singleton class opened on a genuine receipt does not change what it is.
+  def test_an_opened_singleton_class_is_still_the_gems_receipt
+    left, right = [0, 1].map { E.new(_1, [10, 0]) }
+    receipt = left.transfer(1, 3, 4).receipt.tap(&:singleton_class)
+    assert_equal Applied.new(Receipt.new(0, 1, 3, 4, 4)), Applied.new(receipt)
+    assert_equal :applied, right.accept(receipt)
+    assert_equal :replayed, right.accept(receipt.clone)
   end
 
   def test_what_the_escrow_returns_is_valid_and_equal_to_a_hand_built_one
@@ -153,6 +196,18 @@ class ValuesTest < Minitest::Test
   end
 
   private
+
+  # Runs the block with each reader of `value` redefined, then restores it.
+  def readers(value, **bodies)
+    bodies.each_key { |name| value.alias_method(:"__original_#{name}", name) }
+    bodies.each { |name, body| value.define_method(name, &body) }
+    yield
+  ensure
+    bodies.each_key do |name|
+      value.alias_method(name, :"__original_#{name}")
+      value.remove_method(:"__original_#{name}")
+    end
+  end
 
   def redefining(klass, body)
     singleton = klass.singleton_class

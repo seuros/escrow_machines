@@ -1,34 +1,18 @@
 //! Thin binding to the bounded-counter escrow.
 mod init;
 
-use init::{classes, instance_of};
+use init::classes;
 
 use bytes::Bytes;
 use escrow_machines::{Accepted, ConfigError, Escrow, Mark, Receipt, Refusal, Transfer};
-use magnus::{
-    Error, Integer, RArray, RString, Ruby, Symbol, TryConvert, Value, prelude::*, typed_data::Obj,
-};
+use magnus::{Error, RString, Ruby, Symbol, TryConvert, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{exact_array, exact_fields, exact_typed, integer, keep, symbol};
 use std::cell::RefCell;
 
 /// Replicas one compiled escrow can hold.
 const CAPACITY: usize = 8;
 
 type Core = Escrow<CAPACITY>;
-
-#[derive(Clone, Copy)]
-struct Number(u64);
-
-impl TryConvert for Number {
-    fn try_convert(value: Value) -> Result<Self, Error> {
-        if Integer::from_value(value).is_none() {
-            return Err(Error::new(
-                Ruby::get_with(value).exception_type_error(),
-                "expected an Integer (unsigned 64-bit)",
-            ));
-        }
-        u64::try_convert(value).map(Self)
-    }
-}
 
 const fn refusal(refusal: Refusal) -> &'static str {
     match refusal {
@@ -51,15 +35,16 @@ const fn refusal(refusal: Refusal) -> &'static str {
 fn receipt_from(ruby: &Ruby, value: Value) -> Result<Receipt, Error> {
     // Exactly a Receipt: sealing cannot stop a subclass being bound, and a
     // value that skipped `initialize` (`Marshal.load`) is re-checked below.
-    if !instance_of(value, classes(ruby)?.receipt) {
-        return Err(Error::new(
-            ruby.exception_type_error(),
-            "expected an EscrowMachines::Receipt",
-        ));
-    }
-    let field = |name: &str| value.funcall::<_, _, Number>(name, ()).map(|n| n.0);
-    let (from, to, id) = (field("from")?, field("to")?, field("id")?);
-    let (amount, total) = (field("amount")?, field("total")?);
+    // The fields are read natively: no reader runs.
+    let class = classes(ruby)?.receipt.get(ruby);
+    let [from, to, id, amount, total] =
+        exact_fields::<5>(ruby, value, class, "expected an EscrowMachines::Receipt")?;
+    let (from, to, id) = (
+        integer(from, "from")?,
+        integer(to, "to")?,
+        integer(id, "id")?,
+    );
+    let (amount, total) = (integer(amount, "amount")?, integer(total, "total")?);
     Receipt::new(from, to, id, amount, total).ok_or_else(|| inconsistent_receipt(ruby))
 }
 
@@ -74,14 +59,20 @@ fn inconsistent_receipt(ruby: &Ruby) -> Error {
 /// `Receipt.new`'s private hook: the fields as `Receipt::new` accepts them.
 fn checked_receipt(
     ruby: &Ruby,
-    from: Number,
-    to: Number,
-    id: Number,
-    amount: Number,
-    total: Number,
+    from: Value,
+    to: Value,
+    id: Value,
+    amount: Value,
+    total: Value,
 ) -> Result<(u64, u64, u64, u64, u64), Error> {
-    let receipt = Receipt::new(from.0, to.0, id.0, amount.0, total.0)
-        .ok_or_else(|| inconsistent_receipt(ruby))?;
+    let (from, to, id) = (
+        integer(from, "from")?,
+        integer(to, "to")?,
+        integer(id, "id")?,
+    );
+    let (amount, total) = (integer(amount, "amount")?, integer(total, "total")?);
+    let receipt =
+        Receipt::new(from, to, id, amount, total).ok_or_else(|| inconsistent_receipt(ruby))?;
     Ok(fields(receipt))
 }
 
@@ -97,8 +88,9 @@ const fn fields(receipt: Receipt) -> (u64, u64, u64, u64, u64) {
 }
 
 /// `Mark.new`'s private hook: the fields as `Mark::new` accepts them.
-fn checked_mark(ruby: &Ruby, id: Number, amount: Number) -> Result<(u64, u64), Error> {
-    let mark = Mark::new(id.0, amount.0).ok_or_else(|| {
+fn checked_mark(ruby: &Ruby, id: Value, amount: Value) -> Result<(u64, u64), Error> {
+    let (id, amount) = (integer(id, "id")?, integer(amount, "amount")?);
+    let mark = Mark::new(id, amount).ok_or_else(|| {
         Error::new(
             ruby.exception_range_error(),
             "a mark records a transfer of at least 1 right",
@@ -115,40 +107,22 @@ fn checked_transfer(ruby: &Ruby, receipt: Value) -> Result<Value, Error> {
     Ok(receipt)
 }
 
-/// Runs `act` on a copy of the escrow in `cell` and keeps the copy only once
-/// `act`, which builds the answer and may run Ruby, has returned. A raise
-/// while building leaves the escrow as it was, so no work is lost. Right
-/// before the store the receiver is checked again: frozen meanwhile raises
-/// `FrozenError`, changed meanwhile (a redefined `new` calling back in)
-/// raises `RuntimeError`, and in both cases the copy is not applied.
-fn on_copy<R>(
-    ruby: &Ruby,
-    this: Obj<Wrapper>,
-    act: impl FnOnce(&mut Core) -> Result<R, Error>,
-) -> Result<R, Error> {
-    this.check_frozen()?;
-    let before = *this.core.borrow();
-    let mut after = before;
-    let answer = act(&mut after)?;
-    this.check_frozen()?;
-    let mut held = this.core.borrow_mut();
-    if *held != before {
-        return Err(Error::new(
-            ruby.exception_runtime_error(),
-            "the escrow changed while the answer was built; the call was not applied",
-        ));
-    }
-    *held = after;
-    Ok(answer)
-}
-
 #[magnus::wrap(class = "EscrowMachines::Escrow", free_immediately, size)]
 struct Wrapper {
     core: RefCell<Core>,
 }
 
 impl Wrapper {
-    fn new(ruby: &Ruby, local: Number, allotted: RArray) -> Result<Self, Error> {
+    /// The escrow `merge` and `recover` read: exactly an
+    /// `EscrowMachines::Escrow`, a subclass instance refused with `TypeError`.
+    fn partner(ruby: &Ruby, other: Value) -> Result<Obj<Self>, Error> {
+        let class = classes(ruby)?.escrow.get(ruby);
+        exact_typed(ruby, other, class, "expected an EscrowMachines::Escrow")
+    }
+
+    fn new(ruby: &Ruby, local: Value, allotted: Value) -> Result<Self, Error> {
+        let local = integer(local, "local")?;
+        let allotted = exact_array(ruby, allotted, "allotted must be an Array of Integers")?;
         let range = |message: &'static str| Error::new(ruby.exception_range_error(), message);
         if allotted.len() > CAPACITY {
             return Err(range("more replicas than EscrowMachines::CAPACITY"));
@@ -156,9 +130,9 @@ impl Wrapper {
         let mut shares = [0_u64; CAPACITY];
         let shares = &mut shares[..allotted.len()];
         for (index, share) in (0_isize..).zip(shares.iter_mut()) {
-            *share = allotted.entry::<Number>(index)?.0;
+            *share = integer(allotted.entry(index)?, "allotted")?;
         }
-        let core = Core::new(local.0, shares).map_err(|error| {
+        let core = Core::new(local, shares).map_err(|error| {
             range(match error {
                 ConfigError::NoReplicas => "allotted must name at least one replica",
                 ConfigError::TooManyReplicas => "more replicas than EscrowMachines::CAPACITY",
@@ -204,72 +178,86 @@ impl Wrapper {
     fn amount_or_refusal(ruby: &Ruby, outcome: Result<u64, Refusal>) -> Value {
         match outcome {
             Ok(left) => ruby.into_value(left),
-            Err(refused) => ruby.to_symbol(refusal(refused)).as_value(),
+            Err(refused) => symbol(ruby, refusal(refused)).as_value(),
         }
     }
 
-    fn spend(ruby: &Ruby, this: Obj<Self>, amount: Number) -> Result<Value, Error> {
+    fn spend(ruby: &Ruby, this: Obj<Self>, amount: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().spend(amount.0);
+        let amount = integer(amount, "amount")?;
+        let outcome = this.core.borrow_mut().spend(amount);
         Ok(Self::amount_or_refusal(ruby, outcome))
     }
 
-    fn refund(ruby: &Ruby, this: Obj<Self>, amount: Number) -> Result<Value, Error> {
+    fn refund(ruby: &Ruby, this: Obj<Self>, amount: Value) -> Result<Value, Error> {
         this.check_frozen()?;
-        let outcome = this.core.borrow_mut().refund(amount.0);
+        let amount = integer(amount, "amount")?;
+        let outcome = this.core.borrow_mut().refund(amount);
         Ok(Self::amount_or_refusal(ruby, outcome))
     }
 
     fn transfer(
         ruby: &Ruby,
         this: Obj<Self>,
-        to: Number,
-        id: Number,
-        amount: Number,
+        to: Value,
+        id: Value,
+        amount: Value,
     ) -> Result<Value, Error> {
         this.check_frozen()?;
+        let (to, id, amount) = (
+            integer(to, "to")?,
+            integer(id, "id")?,
+            integer(amount, "amount")?,
+        );
         // The classes were resolved at init, and the answer is built from a
         // copy kept only once it exists.
         let classes = classes(ruby)?;
-        on_copy(ruby, this, |core| {
-            let (variant, receipt) = match core.transfer(to.0, id.0, amount.0) {
-                Ok(Transfer::Applied(receipt)) => (classes.applied, receipt),
-                Ok(Transfer::Replayed(receipt)) => (classes.replayed, receipt),
-                Err(refused) => return Ok(ruby.to_symbol(refusal(refused)).as_value()),
-            };
-            let receipt: Value = classes.receipt.funcall("new", fields(receipt))?;
-            variant.funcall("new", (receipt,))
-        })
+        keep(
+            ruby,
+            this,
+            &this.core,
+            |core| core.transfer(to, id, amount),
+            |outcome| {
+                let (variant, receipt) = match outcome {
+                    Ok(Transfer::Applied(receipt)) => (classes.applied, receipt),
+                    Ok(Transfer::Replayed(receipt)) => (classes.replayed, receipt),
+                    Err(refused) => return Ok(symbol(ruby, refusal(refused)).as_value()),
+                };
+                let receipt: Value = classes.receipt.get(ruby).funcall("new", fields(receipt))?;
+                variant.get(ruby).funcall("new", (receipt,))
+            },
+        )
     }
 
     fn accept(ruby: &Ruby, this: Obj<Self>, receipt: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
         let receipt = receipt_from(ruby, receipt)?;
-        // Reading the receipt ran its readers, which may have frozen us.
-        this.check_frozen()?;
         let outcome = this.core.borrow_mut().accept(&receipt);
-        Ok(ruby.to_symbol(match outcome {
-            Ok(Accepted::Applied) => "applied",
-            Ok(Accepted::Replayed) => "replayed",
-            Err(refused) => refusal(refused),
-        }))
+        Ok(symbol(
+            ruby,
+            match outcome {
+                Ok(Accepted::Applied) => "applied",
+                Ok(Accepted::Replayed) => "replayed",
+                Err(refused) => refusal(refused),
+            },
+        ))
     }
 
     fn joined(ruby: &Ruby, outcome: Result<(), Refusal>, honoured: &'static str) -> Symbol {
-        ruby.to_symbol(outcome.map_or_else(refusal, |()| honoured))
+        symbol(ruby, outcome.map_or_else(refusal, |()| honoured))
     }
 
-    fn merge(ruby: &Ruby, this: Obj<Self>, other: Obj<Self>) -> Result<Symbol, Error> {
+    fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
         // Copied out first: `other` may be `this`.
-        let other = *other.core.borrow();
+        let other = *Self::partner(ruby, other)?.core.borrow();
         let outcome = this.core.borrow_mut().merge(&other);
         Ok(Self::joined(ruby, outcome, "merged"))
     }
 
-    fn recover(ruby: &Ruby, this: Obj<Self>, other: Obj<Self>) -> Result<Symbol, Error> {
+    fn recover(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Symbol, Error> {
         this.check_frozen()?;
-        let other = *other.core.borrow();
+        let other = *Self::partner(ruby, other)?.core.borrow();
         let outcome = this.core.borrow_mut().recover(&other);
         Ok(Self::joined(ruby, outcome, "recovered"))
     }
@@ -294,33 +282,40 @@ impl Wrapper {
         self.core.borrow().available()
     }
 
-    fn allotted(&self, replica: Number) -> Option<u64> {
-        self.core.borrow().allotted(replica.0)
+    fn allotted(&self, replica: Value) -> Result<Option<u64>, Error> {
+        let replica = integer(replica, "replica")?;
+        Ok(self.core.borrow().allotted(replica))
     }
 
-    fn balance(&self, replica: Number) -> Option<i128> {
-        self.core.borrow().balance(replica.0)
+    fn balance(&self, replica: Value) -> Result<Option<i128>, Error> {
+        let replica = integer(replica, "replica")?;
+        Ok(self.core.borrow().balance(replica))
     }
 
-    fn spent(&self, replica: Number) -> Option<u64> {
-        self.core.borrow().spent(replica.0)
+    fn spent(&self, replica: Value) -> Result<Option<u64>, Error> {
+        let replica = integer(replica, "replica")?;
+        Ok(self.core.borrow().spent(replica))
     }
 
-    fn refunded(&self, replica: Number) -> Option<u64> {
-        self.core.borrow().refunded(replica.0)
+    fn refunded(&self, replica: Value) -> Result<Option<u64>, Error> {
+        let replica = integer(replica, "replica")?;
+        Ok(self.core.borrow().refunded(replica))
     }
 
-    fn outstanding(&self, replica: Number) -> Option<u64> {
-        self.core.borrow().outstanding(replica.0)
+    fn outstanding(&self, replica: Value) -> Result<Option<u64>, Error> {
+        let replica = integer(replica, "replica")?;
+        Ok(self.core.borrow().outstanding(replica))
     }
 
-    fn granted(&self, from: Number, to: Number) -> Option<u64> {
-        self.core.borrow().granted(from.0, to.0)
+    fn granted(&self, from: Value, to: Value) -> Result<Option<u64>, Error> {
+        let (from, to) = (integer(from, "from")?, integer(to, "to")?);
+        Ok(self.core.borrow().granted(from, to))
     }
 
-    fn last_transfer(ruby: &Ruby, this: &Self, from: Number, to: Number) -> Result<Value, Error> {
-        let class = classes(ruby)?.mark;
-        let Some(mark) = this.core.borrow().last_transfer(from.0, to.0) else {
+    fn last_transfer(ruby: &Ruby, this: &Self, from: Value, to: Value) -> Result<Value, Error> {
+        let (from, to) = (integer(from, "from")?, integer(to, "to")?);
+        let class = classes(ruby)?.mark.get(ruby);
+        let Some(mark) = this.core.borrow().last_transfer(from, to) else {
             return Ok(ruby.qnil().as_value());
         };
         class.funcall("new", (mark.id(), mark.amount()))

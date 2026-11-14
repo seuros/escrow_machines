@@ -11,5 +11,7 @@ keywords = ["escrow", "crdt", "bounded-counter", "idempotency", "no-std"]
 categories = ["no-std", "data-structures"]
 [dependencies]
 merge-machines.workspace = true
+[dev-dependencies]
+matryona-machines = { workspace = true, features = ["testing"] }
 [lints]
 workspace = true
