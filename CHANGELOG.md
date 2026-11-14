@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.5.0...escrow_machines/v0.6.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* escrow partner refusals name the class received
+
+### Features
+
+* escrow partner refusals name the class received ([0efa5da](https://github.com/seuros/escrow_machines/commit/0efa5dae455c8a2b571983024753116c57f3c89f))
+
 ## [0.5.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.4.0...escrow_machines/v0.5.0) (2026-11-14)
 
 
