@@ -3,10 +3,11 @@ mod init;
 
 use init::classes;
 
-use bytes::Bytes;
 use escrow_machines::{Accepted, ConfigError, Escrow, Mark, Receipt, Refusal, Transfer};
-use magnus::{Error, RString, Ruby, Symbol, TryConvert, Value, prelude::*, typed_data::Obj};
-use matryona_machines::ruby::{exact_array, exact_fields, exact_typed, integer, keep, symbol};
+use magnus::{Error, RString, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
+use matryona_machines::ruby::{
+    SymbolNames, bytes, exact_array, exact_fields, exact_typed, integer, keep, symbol,
+};
 use std::cell::RefCell;
 
 /// Replicas one compiled escrow can hold.
@@ -14,22 +15,29 @@ const CAPACITY: usize = 8;
 
 type Core = Escrow<CAPACITY>;
 
-const fn refusal(refusal: Refusal) -> &'static str {
-    match refusal {
-        Refusal::ZeroAmount => "zero_amount",
-        Refusal::Insufficient { .. } => "insufficient",
-        Refusal::ExceedsSpent { .. } => "exceeds_spent",
-        Refusal::UnknownReplica => "unknown_replica",
-        Refusal::SelfTransfer => "self_transfer",
-        Refusal::StaleId { .. } => "stale_id",
-        Refusal::IdConflict { .. } => "id_conflict",
-        Refusal::Malformed => "malformed",
-        Refusal::Forged => "forged",
-        Refusal::ConfigMismatch => "config_mismatch",
-        Refusal::Diverged => "diverged",
-        Refusal::Overdrawn => "overdrawn",
-        Refusal::Overflow => "overflow",
+matryona_machines::symbols! {
+    /// The symbol each refusal comes back to Ruby as. Several variants carry
+    /// data, so the table names them and never parses one back.
+    Refusals for Refusal as "a refusal" => names_only {
+        ZeroAmount => "zero_amount",
+        Insufficient { .. } => "insufficient",
+        ExceedsSpent { .. } => "exceeds_spent",
+        UnknownReplica => "unknown_replica",
+        SelfTransfer => "self_transfer",
+        StaleId { .. } => "stale_id",
+        IdConflict { .. } => "id_conflict",
+        Malformed => "malformed",
+        Forged => "forged",
+        ConfigMismatch => "config_mismatch",
+        Diverged => "diverged",
+        Overdrawn => "overdrawn",
+        Overflow => "overflow",
     }
+}
+
+/// The refusal's symbol.
+fn refusal(ruby: &Ruby, refused: &Refusal) -> Symbol {
+    Refusals::symbol(ruby, refused)
 }
 
 fn receipt_from(ruby: &Ruby, value: Value) -> Result<Receipt, Error> {
@@ -145,9 +153,9 @@ impl Wrapper {
         })
     }
 
-    fn decode(ruby: &Ruby, bytes: RString) -> Result<Self, Error> {
-        let bytes = Bytes::try_convert(bytes.as_value())?;
-        let core = Core::decode(&bytes).map_err(|error| {
+    fn decode(ruby: &Ruby, frame: Value) -> Result<Self, Error> {
+        let frame = bytes(frame, "bytes")?;
+        let core = Core::decode(&frame).map_err(|error| {
             Error::new(
                 ruby.exception_range_error(),
                 format!("not a decodable escrow frame: {error}"),
@@ -178,7 +186,7 @@ impl Wrapper {
     fn amount_or_refusal(ruby: &Ruby, outcome: Result<u64, Refusal>) -> Value {
         match outcome {
             Ok(left) => ruby.into_value(left),
-            Err(refused) => symbol(ruby, refusal(refused)).as_value(),
+            Err(refused) => refusal(ruby, &refused).as_value(),
         }
     }
 
@@ -221,7 +229,7 @@ impl Wrapper {
                 let (variant, receipt) = match outcome {
                     Ok(Transfer::Applied(receipt)) => (classes.applied, receipt),
                     Ok(Transfer::Replayed(receipt)) => (classes.replayed, receipt),
-                    Err(refused) => return Ok(symbol(ruby, refusal(refused)).as_value()),
+                    Err(refused) => return Ok(refusal(ruby, &refused).as_value()),
                 };
                 let receipt: Value = classes.receipt.get(ruby).funcall("new", fields(receipt))?;
                 variant.get(ruby).funcall("new", (receipt,))
@@ -233,18 +241,18 @@ impl Wrapper {
         this.check_frozen()?;
         let receipt = receipt_from(ruby, receipt)?;
         let outcome = this.core.borrow_mut().accept(&receipt);
-        Ok(symbol(
-            ruby,
-            match outcome {
-                Ok(Accepted::Applied) => "applied",
-                Ok(Accepted::Replayed) => "replayed",
-                Err(refused) => refusal(refused),
-            },
-        ))
+        Ok(match outcome {
+            Ok(Accepted::Applied) => symbol(ruby, "applied"),
+            Ok(Accepted::Replayed) => symbol(ruby, "replayed"),
+            Err(refused) => refusal(ruby, &refused),
+        })
     }
 
     fn joined(ruby: &Ruby, outcome: Result<(), Refusal>, honoured: &'static str) -> Symbol {
-        symbol(ruby, outcome.map_or_else(refusal, |()| honoured))
+        outcome.map_or_else(
+            |refused| refusal(ruby, &refused),
+            |()| symbol(ruby, honoured),
+        )
     }
 
     fn merge(ruby: &Ruby, this: Obj<Self>, other: Value) -> Result<Symbol, Error> {

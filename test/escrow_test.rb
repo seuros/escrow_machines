@@ -150,6 +150,19 @@ class EscrowTest < Minitest::Test
     assert_raises(TypeError) { E.decode(1) }
   end
 
+  # A frame is exactly a String, read natively: a subclass and an object
+  # answering `to_str` are refused, and a redefined `#bytes` is never run.
+  def test_decode_takes_exactly_a_string
+    left, = fleet([10, 5])
+    frame = left.encode
+    error = assert_raises(TypeError) { E.decode(Class.new(String).new(frame)) }
+    assert_equal 'bytes must be a String', error.message
+    stringly = Object.new.tap { |o| o.define_singleton_method(:to_str) { frame } }
+    assert_raises(TypeError) { E.decode(stringly) }
+    lying = frame.dup.tap { |f| f.define_singleton_method(:bytes) { raise 'the binding ran #bytes' } }
+    assert_equal frame, E.decode(lying).encode
+  end
+
   def test_u64_limits_refuse_instead_of_wrapping
     left, right = fleet([MAX, 0])
     assert_equal :applied, right.accept(left.transfer(1, 1, MAX).receipt)

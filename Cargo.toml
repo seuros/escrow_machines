@@ -8,11 +8,10 @@ rust-version = "1.99"
 license = "MIT"
 [workspace.dependencies]
 escrow-machines = { path = "ext/escrow_machines_native/core" }
-matryona-machines = { version = ">=0.2", default-features = false }
-magnus = { version = "0.9.3", default-features = false, features = ["bytes"] }
+matryona-machines = { version = ">=0.3", default-features = false }
+magnus = { version = "0.9.3", default-features = false }
 rb-sys = { version = "0.9.130", default-features = false, features = ["stable-api-compiled-fallback"] }
 merge-machines = { version = ">=0.4", default-features = false }
-bytes = "1"
 [workspace.lints.rust]
 unsafe_code = "deny"
 unused_must_use = "warn"
