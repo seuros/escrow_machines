@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.4.0...escrow_machines/v0.5.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona 0.3: decode takes exactly a String, names_only refusals
+
+### Features
+
+* adopt matryona 0.3: decode takes exactly a String, names_only refusals ([73f1174](https://github.com/seuros/escrow_machines/commit/73f1174ac829f6b089626409483be444de4ae562))
+
 ## [0.4.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.3.0...escrow_machines/v0.4.0) (2026-11-14)
 
 
