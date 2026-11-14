@@ -113,6 +113,15 @@ class ValuesTest < Minitest::Test
     assert_raises(TypeError) { left.recover(Receipt.new(0, 1, 3, 4, 4)) }
   end
 
+  # A refused partner's TypeError names the class it got.
+  def test_a_refused_partner_names_the_class_received
+    left = E.new(0, [10, 0])
+    error = assert_raises(TypeError) { left.merge(Object.new) }
+    assert_equal 'other must be an EscrowMachines::Escrow, not Object', error.message
+    error = assert_raises(TypeError) { left.recover(Receipt.new(0, 1, 3, 4, 4)) }
+    assert_equal 'other must be an EscrowMachines::Escrow, not EscrowMachines::Receipt', error.message
+  end
+
   # Sealing stops accidents, not reflection: Ruby binds a named subclass's
   # constant before `inherited` raises, so the class leaks. Both forms raise.
   def test_values_are_sealed_and_a_named_subclass_leaks_its_constant

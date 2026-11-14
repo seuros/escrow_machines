@@ -6,7 +6,7 @@ use init::classes;
 use escrow_machines::{Accepted, ConfigError, Escrow, Mark, Receipt, Refusal, Transfer};
 use magnus::{Error, RString, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
 use matryona_machines::ruby::{
-    SymbolNames, bytes, exact_array, exact_fields, exact_typed, integer, keep, symbol,
+    SymbolNames, bytes, exact_array, exact_fields, exact_typed_with, integer, keep, symbol,
 };
 use std::cell::RefCell;
 
@@ -122,10 +122,16 @@ struct Wrapper {
 
 impl Wrapper {
     /// The escrow `merge` and `recover` read: exactly an
-    /// `EscrowMachines::Escrow`, a subclass instance refused with `TypeError`.
+    /// `EscrowMachines::Escrow`, a subclass instance refused with `TypeError`
+    /// naming the class received.
     fn partner(ruby: &Ruby, other: Value) -> Result<Obj<Self>, Error> {
         let class = classes(ruby)?.escrow.get(ruby);
-        exact_typed(ruby, other, class, "expected an EscrowMachines::Escrow")
+        exact_typed_with(ruby, other, class, || {
+            format!(
+                "other must be an EscrowMachines::Escrow, not {}",
+                other.class()
+            )
+        })
     }
 
     fn new(ruby: &Ruby, local: Value, allotted: Value) -> Result<Self, Error> {
