@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.3.0...escrow_machines/v0.4.0) (2026-11-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* adopt matryona-machines 0.2: exact Receipt fields, exact-class Escrow partners, honoured replays proven unchanged
+
+### Features
+
+* adopt matryona-machines 0.2: exact Receipt fields, exact-class Escrow partners, honoured replays proven unchanged ([78045e6](https://github.com/seuros/escrow_machines/commit/78045e6f0722a55c2804920207ae197a1e472ac9))
+
 ## [0.3.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.2.0...escrow_machines/v0.3.0) (2026-11-14)
 
 
