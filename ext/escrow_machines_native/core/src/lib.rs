@@ -38,28 +38,103 @@ pub use frame::FrameError;
 use merge_machines::GCounter;
 pub use merge_machines::{Merge, ReplicaId};
 
-/// The latest transfer one replica made to another.
+/// The latest transfer one replica made to another. Built only through
+/// [`Mark::new`], so it never records a transfer of nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Mark {
+    id: u64,
+    amount: u64,
+}
+
+impl Mark {
+    /// The mark of transfer `id` moving `amount`, or `None` for an amount of
+    /// zero: no transfer moves nothing.
+    #[must_use]
+    pub const fn new(id: u64, amount: u64) -> Option<Self> {
+        if amount == 0 {
+            return None;
+        }
+        Some(Self { id, amount })
+    }
+
     /// The caller-chosen id of that transfer.
-    pub id: u64,
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
     /// How many rights it moved.
-    pub amount: u64,
+    #[must_use]
+    pub const fn amount(&self) -> u64 {
+        self.amount
+    }
 }
 
 /// Proof of one transfer, safe to deliver any number of times in any order.
+/// Built only by [`Escrow::transfer`] or [`Receipt::new`], so it never
+/// contradicts itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Receipt {
+    from: ReplicaId,
+    to: ReplicaId,
+    id: u64,
+    amount: u64,
+    total: u64,
+}
+
+impl Receipt {
+    /// A receipt that does not contradict itself, or `None` when it names one
+    /// replica on both ends, moves nothing, or moves more than the cumulative
+    /// `total` it claims.
+    #[must_use]
+    pub const fn new(
+        from: ReplicaId,
+        to: ReplicaId,
+        id: u64,
+        amount: u64,
+        total: u64,
+    ) -> Option<Self> {
+        if from == to || amount == 0 || amount > total {
+            return None;
+        }
+        Some(Self {
+            from,
+            to,
+            id,
+            amount,
+            total,
+        })
+    }
+
     /// The replica that gave the rights away.
-    pub from: ReplicaId,
+    #[must_use]
+    pub const fn from(&self) -> ReplicaId {
+        self.from
+    }
+
     /// The replica that received them.
-    pub to: ReplicaId,
+    #[must_use]
+    pub const fn to(&self) -> ReplicaId {
+        self.to
+    }
+
     /// The caller-chosen id of the transfer.
-    pub id: u64,
+    #[must_use]
+    pub const fn id(&self) -> u64 {
+        self.id
+    }
+
     /// How many rights this transfer moved.
-    pub amount: u64,
+    #[must_use]
+    pub const fn amount(&self) -> u64 {
+        self.amount
+    }
+
     /// Everything `from` has ever granted `to`, this transfer included.
-    pub total: u64,
+    #[must_use]
+    pub const fn total(&self) -> u64 {
+        self.total
+    }
 }
 
 /// What a transfer request did.
@@ -165,6 +240,40 @@ impl core::fmt::Display for Refusal {
 }
 
 impl core::error::Error for Refusal {}
+
+/// A grow-only counter's answer to an increment or merge, in escrow's own
+/// vocabulary. Every counter here is a `GCounter<N>` holding only replica ids
+/// below `replicas <= N`, so it always has a slot, and every increment and
+/// merge is checked against `u64::MAX` first; the counter's refusal leaves it
+/// unchanged either way.
+pub(crate) fn counted(outcome: Result<(), merge_machines::Refusal>) -> Result<(), Refusal> {
+    use merge_machines::Refusal as Counter;
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(Counter::Overflow) => Err(Refusal::Overflow),
+        Err(Counter::Full) => {
+            debug_assert!(
+                false,
+                "a counter over ids below replicas <= N always has a slot"
+            );
+            Err(Refusal::Overflow)
+        }
+        Err(
+            Counter::Exhausted
+            | Counter::Mismatch
+            | Counter::Truncated
+            | Counter::WrongStructure
+            | Counter::WrongShape
+            | Counter::Malformed,
+        ) => {
+            debug_assert!(
+                false,
+                "a counter increment or merge answers only Full or Overflow"
+            );
+            Err(Refusal::Overflow)
+        }
+    }
+}
 
 /// Why an escrow could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,5 +1,5 @@
 //! Boundaries: refusals, replays, lost state, u64 limits, frames.
-use super::Ship;
+use super::{Ship, receipt};
 use crate::*;
 
 #[test]
@@ -52,39 +52,21 @@ fn transfers_replay_by_id_and_refuse_stale_or_conflicting_ids() {
         left.transfer(1, 5, 11),
         Err(Refusal::Insufficient { available: 10 })
     );
-    let receipt = Receipt {
-        from: 0,
-        to: 1,
-        id: 5,
-        amount: 4,
-        total: 4,
-    };
-    assert_eq!(left.transfer(1, 5, 4), Ok(Transfer::Applied(receipt)));
-    assert_eq!(left.transfer(1, 5, 4), Ok(Transfer::Replayed(receipt)));
-    assert_eq!(left.transfer(1, 5, 4).map(|t| t.receipt()), Ok(receipt));
+    let first = receipt(0, 1, 5, 4, 4);
+    assert_eq!(left.transfer(1, 5, 4), Ok(Transfer::Applied(first)));
+    assert_eq!(left.transfer(1, 5, 4), Ok(Transfer::Replayed(first)));
+    assert_eq!(left.transfer(1, 5, 4).map(|t| t.receipt()), Ok(first));
     assert_eq!(left.available(), 6);
     assert_eq!(
         left.transfer(1, 5, 3),
         Err(Refusal::IdConflict { amount: 4 })
     );
     assert_eq!(left.transfer(1, 4, 4), Err(Refusal::StaleId { latest: 5 }));
-    assert_eq!(left.last_transfer(0, 1), Some(Mark { id: 5, amount: 4 }));
+    assert_eq!(left.last_transfer(0, 1), Mark::new(5, 4));
     // Ids are scoped to the pair: the same id to another replica is fresh.
-    let other = Receipt {
-        from: 0,
-        to: 2,
-        id: 5,
-        amount: 1,
-        total: 1,
-    };
+    let other = receipt(0, 2, 5, 1, 1);
     assert_eq!(left.transfer(2, 5, 1), Ok(Transfer::Applied(other)));
-    let second = Receipt {
-        from: 0,
-        to: 1,
-        id: 6,
-        amount: 2,
-        total: 6,
-    };
+    let second = receipt(0, 1, 6, 2, 6);
     assert_eq!(left.transfer(1, 6, 2), Ok(Transfer::Applied(second)));
     // A replayed id is answered even when the balance could not pay it again.
     assert_eq!(left.spend(3), Ok(0));
@@ -94,14 +76,14 @@ fn transfers_replay_by_id_and_refuse_stale_or_conflicting_ids() {
     // Receipts land out of order and more than once.
     assert_eq!(right.accept(&second), Ok(Accepted::Applied));
     assert_eq!(right.available(), 6);
-    assert_eq!(right.accept(&receipt), Ok(Accepted::Replayed));
+    assert_eq!(right.accept(&first), Ok(Accepted::Replayed));
     assert_eq!(right.accept(&second), Ok(Accepted::Replayed));
     assert_eq!(right.available(), 6);
     assert_eq!(right.granted(0, 1), Some(6));
     assert_eq!(left.accept(&second), Ok(Accepted::Replayed));
     // A bystander may carry the receipt too; it gains nothing spendable.
     let mut third = Ship::new(2, &[10, 0, 0]).expect("config");
-    assert_eq!(third.accept(&receipt), Ok(Accepted::Applied));
+    assert_eq!(third.accept(&first), Ok(Accepted::Applied));
     assert_eq!(third.accept(&second), Ok(Accepted::Applied));
     assert_eq!((third.available(), third.granted(0, 1)), (0, Some(6)));
 }
@@ -114,22 +96,16 @@ fn receipts_that_lie_are_refused_without_effect() {
     let second = left.transfer(1, 2, 4).expect("transfer").receipt();
     right.accept(&second).expect("accept");
     let before = right;
-    let lie = |change: fn(&mut Receipt)| {
-        let mut receipt = second;
-        change(&mut receipt);
-        receipt
-    };
+    // Each lie is a receipt consistent with itself: one that is not cannot be
+    // built at all (see `constructors_refuse_values_no_call_produces`).
     let cases = [
-        (lie(|r| r.from = 4), Refusal::UnknownReplica),
-        (lie(|r| r.to = 4), Refusal::UnknownReplica),
-        (lie(|r| r.from = 1), Refusal::SelfTransfer),
-        (lie(|r| r.amount = 0), Refusal::Malformed),
-        (lie(|r| r.amount = 8), Refusal::Malformed),
-        (lie(|r| r.amount = 5), Refusal::IdConflict { amount: 4 }),
-        (lie(|r| r.total = 9), Refusal::Malformed),
-        (lie(|r| (r.id, r.total) = (3, 7)), Refusal::Malformed),
-        (lie(|r| (r.id, r.total) = (3, 10)), Refusal::Malformed),
-        (lie(|r| (r.id, r.amount) = (1, 4)), Refusal::Malformed),
+        (receipt(4, 1, 2, 4, 7), Refusal::UnknownReplica),
+        (receipt(0, 4, 2, 4, 7), Refusal::UnknownReplica),
+        (receipt(0, 1, 2, 5, 7), Refusal::IdConflict { amount: 4 }),
+        (receipt(0, 1, 2, 4, 9), Refusal::Malformed),
+        (receipt(0, 1, 3, 4, 7), Refusal::Malformed),
+        (receipt(0, 1, 3, 4, 10), Refusal::Malformed),
+        (receipt(0, 1, 1, 4, 7), Refusal::Malformed),
     ];
     for (receipt, refusal) in cases {
         assert_eq!(right.accept(&receipt), Err(refusal), "{receipt:?}");
@@ -137,13 +113,7 @@ fn receipts_that_lie_are_refused_without_effect() {
     }
     assert_eq!(right.accept(&first), Ok(Accepted::Replayed));
     // The giver knows what it gave: a later id it never issued is a forgery.
-    let forged = Receipt {
-        from: 0,
-        to: 1,
-        id: 3,
-        amount: 1,
-        total: 8,
-    };
+    let forged = receipt(0, 1, 3, 1, 8);
     let giver = left;
     assert_eq!(left.accept(&forged), Err(Refusal::Forged));
     assert_eq!(left, giver);
@@ -151,13 +121,7 @@ fn receipts_that_lie_are_refused_without_effect() {
     assert_eq!(fresh.accept(&first), Err(Refusal::Forged));
     // A receipt that would push the local balance past u64::MAX.
     let mut rich = Ship::new(1, &[0, u64::MAX]).expect("config");
-    let gift = Receipt {
-        from: 0,
-        to: 1,
-        id: 1,
-        amount: 1,
-        total: 1,
-    };
+    let gift = receipt(0, 1, 1, 1, 1);
     assert_eq!(rich.accept(&gift), Err(Refusal::Overflow));
     assert_eq!(rich, Ship::new(1, &[0, u64::MAX]).expect("config"));
 }
@@ -307,4 +271,17 @@ fn frames_round_trip_and_reject_what_no_history_could_produce() {
     assert_eq!(patched(last_mark, 1), Err(FrameError::Corrupt)); // mark without a grant
     assert_eq!(patched(last_mark + 1, 1), Err(FrameError::Corrupt));
     assert_eq!(FrameError::Corrupt.to_string(), "impossible state");
+}
+
+#[test]
+fn constructors_refuse_values_no_call_produces() {
+    let mark = Mark::new(3, 2).map(|mark| (mark.id(), mark.amount()));
+    assert_eq!(mark, Some((3, 2)));
+    assert_eq!(Mark::new(3, 0), None);
+    let fields =
+        Receipt::new(0, 1, 7, 4, 9).map(|r| (r.from(), r.to(), r.id(), r.amount(), r.total()));
+    assert_eq!(fields, Some((0, 1, 7, 4, 9)));
+    assert_eq!(Receipt::new(1, 1, 7, 4, 9), None);
+    assert_eq!(Receipt::new(0, 1, 7, 0, 9), None);
+    assert_eq!(Receipt::new(0, 1, 7, 10, 9), None);
 }

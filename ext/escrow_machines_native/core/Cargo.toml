@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 description = "Bounded-counter escrow: fixed-replica rights accounting, conserved spends, and replay-safe transfers"
 readme = "README.md"
-exclude = ["src/**/tests.rs", "tests/"]
+exclude = ["src/**/tests.rs", "src/tests/", "tests/"]
 keywords = ["escrow", "crdt", "bounded-counter", "idempotency", "no-std"]
 categories = ["no-std", "data-structures"]
 [dependencies]

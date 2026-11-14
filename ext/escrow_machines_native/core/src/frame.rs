@@ -1,7 +1,7 @@
 //! The fixed-length frame a replica persists to keep its identity durable.
 
 use crate::{Escrow, Mark};
-use merge_machines::{CodecError, GCounter, ReplicaId};
+use merge_machines::{GCounter, Refusal as Counter, ReplicaId};
 
 /// The byte that leads every escrow frame.
 const TAG: u8 = 0xE5;
@@ -82,9 +82,11 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// The low two bytes of `value`, which is at most `N`, and `encode`
+    /// rejects at compile time any `N` above [`u16::MAX`].
     fn put_small(&mut self, value: usize) -> Result<(), FrameError> {
-        let value = u16::try_from(value).map_err(|_| FrameError::Shape)?;
-        self.put(&value.to_le_bytes())
+        let [low, high, ..] = value.to_le_bytes();
+        self.put(&[low, high])
     }
 
     fn put_counter<const N: usize>(&mut self, counter: &GCounter<N>) -> Result<(), FrameError> {
@@ -92,9 +94,15 @@ impl Writer<'_> {
             .encode(self.slot(GCounter::<N>::ENCODED_LEN)?)
             .map(|_| ())
             .map_err(|error| match error {
-                // The slot is exactly one counter long, so only its length
-                // can be at fault.
-                CodecError::Truncated | CodecError::Tag | CodecError::Parameters => {
+                Counter::Truncated => FrameError::Truncated,
+                Counter::Full
+                | Counter::Overflow
+                | Counter::Exhausted
+                | Counter::Mismatch
+                | Counter::WrongStructure
+                | Counter::WrongShape
+                | Counter::Malformed => {
+                    debug_assert!(false, "encoding a counter answers only Truncated");
                     FrameError::Truncated
                 }
             })
@@ -103,8 +111,12 @@ impl Writer<'_> {
 
 fn take_counter<const N: usize>(bytes: &mut &[u8]) -> Result<GCounter<N>, FrameError> {
     GCounter::decode(take(bytes, GCounter::<N>::ENCODED_LEN)?).map_err(|error| match error {
-        CodecError::Truncated => FrameError::Truncated,
-        CodecError::Tag | CodecError::Parameters => FrameError::Corrupt,
+        Counter::Truncated => FrameError::Truncated,
+        Counter::WrongStructure | Counter::WrongShape | Counter::Malformed => FrameError::Corrupt,
+        Counter::Full | Counter::Overflow | Counter::Exhausted | Counter::Mismatch => {
+            debug_assert!(false, "decoding a counter answers only codec refusals");
+            FrameError::Corrupt
+        }
     })
 }
 
@@ -128,9 +140,10 @@ impl<const N: usize> Escrow<N> {
     /// # Errors
     ///
     /// [`FrameError::Truncated`] when `out` is shorter than
-    /// [`ENCODED_LEN`](Self::ENCODED_LEN), [`FrameError::Shape`] when `N` does
-    /// not fit the frame's two-byte capacity field.
+    /// [`ENCODED_LEN`](Self::ENCODED_LEN), and nothing else: an `N` that does
+    /// not fit the frame's two-byte capacity field does not compile.
     pub fn encode(&self, out: &mut [u8]) -> Result<usize, FrameError> {
+        const { assert!(N <= u16::MAX as usize, "the capacity must fit two bytes") };
         let out = out
             .get_mut(..Self::ENCODED_LEN)
             .ok_or(FrameError::Truncated)?;

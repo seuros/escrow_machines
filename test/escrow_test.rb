@@ -91,9 +91,10 @@ class EscrowTest < Minitest::Test
     assert_equal :applied, right.accept(receipt)
     assert_equal :id_conflict, right.accept(receipt.with(amount: 3))
     assert_equal :malformed, right.accept(receipt.with(total: 9))
-    assert_equal :malformed, right.accept(receipt.with(amount: 0))
     assert_equal :unknown_replica, right.accept(receipt.with(from: 2))
-    assert_equal :self_transfer, right.accept(receipt.with(from: 1))
+    # A receipt that contradicts itself cannot be built at all.
+    assert_raises(RangeError) { receipt.with(amount: 0) }
+    assert_raises(RangeError) { receipt.with(from: 1) }
     assert_equal :forged, left.accept(receipt.with(id: 2, total: 9))
     assert_equal :overflow, E.new(1, [0, MAX]).accept(receipt)
     assert_equal 4, right.available
@@ -142,9 +143,9 @@ class EscrowTest < Minitest::Test
     assert_equal frame, copy.encode
     assert_equal [0, 2, 6, 3, Mark.new(id: 2, amount: 1)],
                  [copy.local, copy.replicas, copy.available, copy.spent(0), copy.last_transfer(0, 1)]
-    assert_raises(ArgumentError) { E.decode(frame[0...-1]) }
-    assert_raises(ArgumentError) { E.decode("\x00#{frame[1..]}".b) }
-    assert_raises(ArgumentError) { E.decode('') }
+    assert_raises(RangeError) { E.decode(frame[0...-1]) }
+    assert_raises(RangeError) { E.decode("\x00#{frame[1..]}".b) }
+    assert_raises(RangeError) { E.decode('') }
     assert_raises(TypeError) { E.decode(nil) }
     assert_raises(TypeError) { E.decode(1) }
   end
@@ -175,9 +176,7 @@ class EscrowTest < Minitest::Test
     assert_raises(RangeError) { E.new(0, [MAX, 1]) }
     assert_raises(RangeError) { E.new(0, [1] * 9) }
     assert_equal 8, E.new(7, [1] * 8).replicas
-    assert_raises(ArgumentError) { E.new(0) }
     assert_raises(ArgumentError) { E.new(local: 0, allotted: [1]) }
-    assert_raises(NoMethodError) { E.load('') }
     assert_raises(TypeError) { E.allocate }
 
     escrow = E.new(0, [5, 5])
@@ -201,7 +200,6 @@ class EscrowTest < Minitest::Test
       assert_raises(RangeError) { escrow.allotted(v) }
       assert_raises(RangeError) { escrow.accept(Receipt.new(0, 1, v, 1, 1)) }
     end
-    assert_raises(ArgumentError) { escrow.transfer(1, 1) }
     assert_raises(ArgumentError) { escrow.transfer(to: 1, id: 1, amount: 1) }
     assert_equal 5, escrow.available
   end

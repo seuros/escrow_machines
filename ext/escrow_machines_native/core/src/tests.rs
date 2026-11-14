@@ -1,9 +1,13 @@
-#![allow(clippy::expect_used)]
 use super::*;
 
 mod edges;
 
 type Ship = Escrow<4>;
+
+/// A receipt the test knows is consistent with itself.
+fn receipt(from: ReplicaId, to: ReplicaId, id: u64, amount: u64, total: u64) -> Receipt {
+    Receipt::new(from, to, id, amount, total).expect("a receipt consistent with itself")
+}
 
 /// Caller-supplied draws for the randomized runs.
 struct Draws(u64);
@@ -75,13 +79,13 @@ impl Model {
     }
     fn receipt(&self, index: usize) -> Receipt {
         let event = &self.events[index];
-        Receipt {
-            from: event.from as ReplicaId,
-            to: event.to as ReplicaId,
-            id: event.id,
-            amount: event.amount,
-            total: self.total(index),
-        }
+        receipt(
+            event.from as ReplicaId,
+            event.to as ReplicaId,
+            event.id,
+            event.amount,
+            self.total(index),
+        )
     }
     fn transfer(
         &mut self,
@@ -353,12 +357,10 @@ fn refused_calls_in_a_randomized_run_leave_the_state_untouched() {
             1 => fleet[replica].refund(amount).is_err(),
             2 => fleet[replica].transfer(to, id, amount).is_err(),
             _ => {
-                let receipt = Receipt {
-                    from: draws.below(4),
-                    to,
-                    id,
-                    amount,
-                    total: draws.below(12),
+                let (from, total) = (draws.below(4), draws.below(12));
+                // A receipt contradicting itself cannot be built at all.
+                let Some(receipt) = Receipt::new(from, to, id, amount, total) else {
+                    continue;
                 };
                 // A fabricated receipt can mint, so refuse-or-revert both ways.
                 let failed = fleet[replica].accept(&receipt).is_err();

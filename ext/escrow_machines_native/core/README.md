@@ -20,7 +20,12 @@ refusal is a `Refusal` value and leaves the state untouched; counters refuse at
 `u64::MAX` instead of wrapping.
 
 The counters are `merge-machines` `GCounter`s and `Escrow` implements its
-`Merge` trait. The escrow adds what a PN-counter lacks: writes are restricted to
+`Merge` trait. A counter's own refusal never reaches the caller: its
+`Overflow` becomes escrow's `Overflow`, and a counter frame it cannot read
+becomes `FrameError::Corrupt` (or `Truncated`). The answers escrow's
+invariants rule out (a `Full` counter, which cannot happen with at most `N`
+replica ids; any non-codec refusal from a decode) trip a `debug_assert!` in
+tests and answer the conservative `Overflow` / `Corrupt` with nothing changed. The escrow adds what a PN-counter lacks: writes are restricted to
 the local replica's own cells and bounded by its balance.
 
 Contracts the caller owns:
@@ -37,8 +42,18 @@ Contracts the caller owns:
 - **Membership.** The replica set and allotment are fixed at construction and
   must be identical on every replica.
 
+`Receipt::new` and `Mark::new` build only values some call could produce
+(`None` for a receipt naming one replica twice, moving zero or more than its
+`total`, and for a mark of zero). Their fields are private, read through
+`from()`, `to()`, `id()`, `amount()`, `total()`, so no receipt contradicts
+itself and `accept` needs no check for one: its `Malformed` is a receipt that
+contradicts the grants already seen.
+
+No call takes a clock, so no answer records one.
+
 The Ruby gem mirrors `Receipt` and `Mark` as `Data` values of the same names,
-and `Transfer` as one `Data` per variant, `Transfer::Applied` and
-`Transfer::Replayed`, each carrying the `receipt`.
+validated through those constructors, and `Transfer` as one `Data` per
+variant, `Transfer::Applied` and `Transfer::Replayed`, each carrying the
+`receipt`.
 
 Initial, unstable API. No clock, I/O, hashing, or randomness.

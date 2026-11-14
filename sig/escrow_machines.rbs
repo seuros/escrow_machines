@@ -3,11 +3,19 @@ module EscrowMachines
   CAPACITY: Integer
 
   # Every refusal symbol. A refused call changed nothing. Each method below
-  # lists exactly the ones it can answer.
+  # lists exactly the ones it can answer. No answer records a clock: escrow
+  # takes none. Four refusals carry a number in the core and are bare symbols
+  # here; read the number instead: :insufficient from `available`,
+  # :exceeds_spent from `outstanding(local)`, :stale_id from
+  # `last_transfer(local, to).id`, :id_conflict from `last_transfer(from,
+  # to).amount`.
   type refusal = :zero_amount | :insufficient | :exceeds_spent | :unknown_replica | :self_transfer
                | :stale_id | :id_conflict | :malformed | :forged | :config_mismatch | :diverged
                | :overdrawn | :overflow
 
+  # Validated like the core's `Receipt::new`: RangeError when `from == to`,
+  # `amount` is zero or `amount` exceeds `total`, or a field is outside
+  # 0..2**64-1; TypeError for a non-Integer.
   class Receipt < Data
     attr_reader from: Integer
     attr_reader to: Integer
@@ -19,7 +27,7 @@ module EscrowMachines
   end
 
   # Mirrors the core's `Transfer`: one `Data` per variant, each carrying the
-  # receipt to deliver.
+  # receipt to deliver. TypeError unless `receipt` is a Receipt.
   module Transfer
     class Applied < Data
       attr_reader receipt: Receipt
@@ -36,7 +44,9 @@ module EscrowMachines
 
   type transfer = Transfer::Applied | Transfer::Replayed
 
-  # Mirrors the core's `Mark`.
+  # Mirrors the core's `Mark`, validated like `Mark::new`: RangeError for an
+  # `amount` of zero or a field outside 0..2**64-1, TypeError for a
+  # non-Integer.
   class Mark < Data
     attr_reader id: Integer
     attr_reader amount: Integer
@@ -53,7 +63,8 @@ module EscrowMachines
     # answers `ConfigError`: no replica, more than CAPACITY, a `local` outside
     # `allotted`, or a supply past 2**64-1.
     def self.new: (Integer local, Array[Integer] allotted) -> Escrow
-    # Raises ArgumentError for a frame the core cannot decode.
+    # Raises RangeError for a frame the core cannot decode, TypeError for a
+    # non-String.
     def self.decode: (String bytes) -> Escrow
     def encode: () -> String
     # Honoured: the rights this replica has left. Refused: :zero_amount,
@@ -69,10 +80,10 @@ module EscrowMachines
                 -> (transfer | :zero_amount | :unknown_replica | :self_transfer | :stale_id | :id_conflict
                     | :insufficient | :overflow)
     # Honoured: :applied, or the repeat :replayed. Refused: :unknown_replica,
-    # :self_transfer, :malformed, :id_conflict, :forged, :overflow.
+    # :malformed, :id_conflict, :forged, :overflow. A Receipt cannot name one
+    # replica twice, so :self_transfer is `transfer`'s alone.
     def accept: (Receipt receipt)
-              -> (:applied | :replayed | :unknown_replica | :self_transfer | :malformed | :id_conflict | :forged
-                  | :overflow)
+              -> (:applied | :replayed | :unknown_replica | :malformed | :id_conflict | :forged | :overflow)
     # Honoured: :merged. Refused: :config_mismatch, :diverged, :overflow.
     def merge: (Escrow other) -> (:merged | :config_mismatch | :diverged | :overflow)
     # Honoured: :recovered. Refused: :config_mismatch, :diverged, :overdrawn,

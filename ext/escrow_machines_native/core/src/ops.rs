@@ -1,7 +1,20 @@
 //! What a replica does with its own rights: spend, refund, transfer, accept.
 
-use crate::{Accepted, Escrow, Mark, Receipt, Refusal, Transfer};
-use merge_machines::{CapacityError, ReplicaId};
+use crate::{Accepted, Escrow, Mark, Receipt, Refusal, Transfer, counted};
+use merge_machines::{GCounter, ReplicaId};
+
+/// Raises `replica`'s count by `amount`, checked against [`u64::MAX`] first.
+fn count_up<const N: usize>(
+    counter: &mut GCounter<N>,
+    replica: ReplicaId,
+    amount: u64,
+) -> Result<(), Refusal> {
+    counter
+        .count(replica)
+        .checked_add(amount)
+        .ok_or(Refusal::Overflow)?;
+    counted(counter.increment(replica, amount))
+}
 
 impl<const N: usize> Escrow<N> {
     /// Spends `amount` of the local replica's rights and returns what it has
@@ -22,13 +35,7 @@ impl<const N: usize> Escrow<N> {
             return Err(Refusal::Insufficient { available });
         }
         let local = self.local();
-        self.spent
-            .count(local)
-            .checked_add(amount)
-            .ok_or(Refusal::Overflow)?;
-        self.spent
-            .increment(local, amount)
-            .map_err(|CapacityError| Refusal::Overflow)?;
+        count_up(&mut self.spent, local, amount)?;
         Ok(available - amount)
     }
 
@@ -53,13 +60,7 @@ impl<const N: usize> Escrow<N> {
         if amount > outstanding {
             return Err(Refusal::ExceedsSpent { outstanding });
         }
-        self.refunded
-            .count(local)
-            .checked_add(amount)
-            .ok_or(Refusal::Overflow)?;
-        self.refunded
-            .increment(local, amount)
-            .map_err(|CapacityError| Refusal::Overflow)?;
+        count_up(&mut self.refunded, local, amount)?;
         Ok(self.available())
     }
 
@@ -112,9 +113,7 @@ impl<const N: usize> Escrow<N> {
             return Err(Refusal::Insufficient { available });
         }
         let total = granted.checked_add(amount).ok_or(Refusal::Overflow)?;
-        self.grants[self.local]
-            .increment(to, amount)
-            .map_err(|CapacityError| Refusal::Overflow)?;
+        counted(self.grants[self.local].increment(to, amount))?;
         self.marks[self.local][slot] = Some(Mark { id, amount });
         Ok(Transfer::Applied(Receipt {
             from,
@@ -132,9 +131,9 @@ impl<const N: usize> Escrow<N> {
     ///
     /// # Errors
     ///
-    /// [`Refusal::UnknownReplica`], [`Refusal::SelfTransfer`],
-    /// [`Refusal::Malformed`] for a receipt that contradicts itself or the
-    /// grants already seen for the pair, [`Refusal::IdConflict`] for a known id
+    /// [`Refusal::UnknownReplica`], [`Refusal::Malformed`] for a receipt that
+    /// contradicts the grants already seen for the pair (a [`Receipt`] cannot
+    /// contradict itself), [`Refusal::IdConflict`] for a known id
     /// with another amount, [`Refusal::Forged`] for a grant the local replica
     /// would have had to make and did not, or [`Refusal::Overflow`] when the
     /// local balance would pass [`u64::MAX`]. The state is untouched on
@@ -142,12 +141,6 @@ impl<const N: usize> Escrow<N> {
     pub fn accept(&mut self, receipt: &Receipt) -> Result<Accepted, Refusal> {
         let from = self.index(receipt.from).ok_or(Refusal::UnknownReplica)?;
         let to = self.index(receipt.to).ok_or(Refusal::UnknownReplica)?;
-        if from == to {
-            return Err(Refusal::SelfTransfer);
-        }
-        if receipt.amount == 0 || receipt.amount > receipt.total {
-            return Err(Refusal::Malformed);
-        }
         let held = self.grants[from].count(receipt.to);
         let known = self.marks[from][to];
         let fresh = match known {
@@ -184,9 +177,7 @@ impl<const N: usize> Escrow<N> {
         if to == self.local && self.available().checked_add(raise).is_none() {
             return Err(Refusal::Overflow);
         }
-        self.grants[from]
-            .increment(receipt.to, raise)
-            .map_err(|CapacityError| Refusal::Overflow)?;
+        counted(self.grants[from].increment(receipt.to, raise))?;
         self.marks[from][to] = Some(Mark {
             id: receipt.id,
             amount: receipt.amount,

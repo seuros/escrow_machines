@@ -171,7 +171,7 @@ left.available          # => 6, still only its own
 
 ```ruby
 frame = left.encode                             # binary String, Escrow::ENCODED_LEN bytes
-left  = EscrowMachines::Escrow.decode(frame)    # ArgumentError if it isn't a sane frame
+left  = EscrowMachines::Escrow.decode(frame)    # RangeError if it isn't a sane frame
 ```
 
 A replica that restarts from an old frame has forgotten spends it already made. The first peer that remembers them proves it:
@@ -196,24 +196,30 @@ Up to eight replicas, fixed when you build the escrow. The set doesn't grow, shr
 
 ### What each verb can answer
 
+Escrow takes no clock, so no answer records one: every honoured answer, repeats included, depends only on the state and the arguments.
+
 | Verb | Honoured | Refusals |
 | --- | --- | --- |
 | `spend` | the Integer left | `:zero_amount`, `:insufficient`, `:overflow` |
 | `refund` | the Integer now held | `:zero_amount`, `:exceeds_spent`, `:overflow` |
 | `transfer` | a `Transfer::Applied`, or the repeat `Transfer::Replayed` | `:zero_amount`, `:unknown_replica`, `:self_transfer`, `:stale_id`, `:id_conflict`, `:insufficient`, `:overflow` |
-| `accept` | `:applied`, or the repeat `:replayed` | `:unknown_replica`, `:self_transfer`, `:malformed`, `:id_conflict`, `:forged`, `:overflow` |
+| `accept` | `:applied`, or the repeat `:replayed` | `:unknown_replica`, `:malformed`, `:id_conflict`, `:forged`, `:overflow` |
 | `merge` | `:merged` | `:config_mismatch`, `:diverged`, `:overflow` |
 | `recover` | `:recovered` | `:config_mismatch`, `:diverged`, `:overdrawn`, `:overflow` |
 
-`Receipt`, `Mark`, `Transfer::Applied` and `Transfer::Replayed` are frozen `Data` values with the fields of the core types they are named after. Method names are the core's: `local`, `replicas`, `supply`, `allotted`, `available`, `balance`, `spent`, `refunded`, `outstanding`, `granted`, `last_transfer`, `encode`, `decode`. The thirteen refusal symbols are the thirteen variants of the core's `Refusal`, each reachable; there is no catch-all. Four of them carry a number in the core (`Insufficient { available }`, `ExceedsSpent { outstanding }`, `StaleId { latest }`, `IdConflict { amount }`); a refusal in Ruby is a bare symbol, and the same numbers are what `available`, `outstanding(local)` and `last_transfer(local, to)` answer.
+`Receipt`, `Mark`, `Transfer::Applied` and `Transfer::Replayed` are frozen `Data` values with the fields of the core types they are named after. Method names are the core's: `local`, `replicas`, `supply`, `allotted`, `available`, `balance`, `spent`, `refunded`, `outstanding`, `granted`, `last_transfer`, `encode`, `decode`. The thirteen refusal symbols are the thirteen variants of the core's `Refusal`, each reachable; there is no catch-all. Four of them carry a number in the core (`Insufficient { available }`, `ExceedsSpent { outstanding }`, `StaleId { latest }`, `IdConflict { amount }`); a refusal in Ruby is a bare symbol, and the same numbers are what the readers answer: `available` for `:insufficient`, `outstanding(local)` for `:exceeds_spent`, `last_transfer(local, to).id` for `:stale_id` and `last_transfer(from, to).amount` for `:id_conflict`.
+
+`Receipt`, `Mark` and the `Transfer` values are checked by the core when they are built, by hand or by the escrow alike: a receipt naming one replica on both ends, moving zero, or moving more than its `total` raises `RangeError`, as does a `Mark` of zero; a non-Integer field raises `TypeError`, and a `Transfer` value holding anything but a `Receipt` raises `TypeError`. So `accept` never sees a receipt that contradicts itself (the core's `Receipt` has private fields for the same reason), and `:self_transfer` is `transfer`'s answer alone. The four classes are sealed: subclassing one raises `TypeError` and `allocate` is undefined. Sealing stops accidents, not reflection (a named subclass's constant is bound before the raise, `Marshal.load` skips `initialize`), so the binding is the authority: a receipt it reads must be exactly a `Receipt` and is checked by `Receipt::new` again, raising `TypeError` or `RangeError` before the core sees it.
 
 ## The Rules of the Escort
 
-- **Everything is an Integer** in `0..2**64-1`: amounts, replica indexes, ids. Floats, nil and strings raise `TypeError`. Out of range raises `RangeError`. So does an allotment that adds up past `2**64-1`.
+- **Everything is an Integer** in `0..2**64-1`: amounts, replica indexes, ids. Floats, nil and strings raise `TypeError`. Out of range raises `RangeError`. So does an allotment that adds up past `2**64-1`, a frame `decode` cannot read, and a `Receipt` or `Mark` the core would not build. Nothing raises `ArgumentError` except Ruby itself, for a wrong number of arguments.
+- **A raise changes nothing.** Every argument is checked before the core is called, and every class was resolved once when the extension loaded, so a call that raises left the escrow untouched.
 - **Same allotment everywhere.** Every replica is built from the same `allotted` array. Views built from different ones answer `:config_mismatch` and don't merge.
+- **The binding never loses work.** Every argument is read before the core is called. `transfer` builds its answer from a copy of the escrow kept only once the `Transfer` exists: a build that raises moves no rights, one that freezes the escrow raises `FrozenError`, and one that changes the escrow meanwhile (a redefined `new` calling back in) raises `RuntimeError`; in each case the outer transfer is not applied.
 - **Refusals don't raise.** `:insufficient`, `:exceeds_spent`, `:zero_amount`, `:unknown_replica`, `:self_transfer`, `:stale_id`, `:id_conflict`, `:malformed`, `:forged`, `:config_mismatch`, `:diverged`, `:overdrawn` and `:overflow` are answers. A refused call leaves the escrow exactly as it was.
 - **Counters are lifetime totals.** Grants and spends only count up. A pair that has moved `2**64-1` rights between them over the years answers `:overflow` instead of wrapping.
-- **Frozen means frozen.** `freeze` the escrow and `spend`, `refund`, `transfer`, `accept`, `merge` and `recover` raise `FrozenError`.
+- **Frozen means frozen.** `freeze` the escrow and `spend`, `refund`, `transfer`, `accept`, `merge` and `recover` raise `FrozenError`, before any argument is read.
 
 ## What You Think You're Doing vs Reality
 
