@@ -1,4 +1,5 @@
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), deny(clippy::indexing_slicing))]
 //! Bounded-counter escrow: a fixed set of replicas shares a fixed supply of
 //! rights, and each replica may spend only the rights it holds locally.
 //!
@@ -31,12 +32,12 @@
 mod frame;
 mod merge;
 mod ops;
+mod table;
 #[cfg(test)]
 mod tests;
 
-pub use frame::FrameError;
-use merge_machines::GCounter;
 pub use merge_machines::{Merge, ReplicaId};
+use table::{Member, Tally};
 
 /// The latest transfer one replica made to another. Built only through
 /// [`Mark::new`], so it never records a transfer of nothing.
@@ -194,7 +195,8 @@ pub enum Refusal {
         /// The amount recorded under that id.
         amount: u64,
     },
-    /// A receipt contradicts itself or the history it claims to extend.
+    /// A receipt contradicts itself or the history it claims to extend, or
+    /// a frame describes a state no sequence of calls produces.
     Malformed,
     /// A receipt claims a grant from the local replica that it never made.
     Forged,
@@ -207,6 +209,12 @@ pub enum Refusal {
     Overdrawn,
     /// A cumulative counter or the local balance would pass [`u64::MAX`].
     Overflow,
+    /// The buffer is shorter than the frame.
+    Truncated,
+    /// The frame does not lead with the escrow tag.
+    WrongStructure,
+    /// The frame was written for another capacity `N`.
+    WrongShape,
 }
 
 impl core::fmt::Display for Refusal {
@@ -225,7 +233,7 @@ impl core::fmt::Display for Refusal {
                 write!(f, "the latest transfer id for the pair is {latest}")
             }
             Self::IdConflict { amount } => write!(f, "the id already moved {amount}"),
-            Self::Malformed => f.write_str("the receipt contradicts itself or its history"),
+            Self::Malformed => f.write_str("the receipt or frame describes what no calls produce"),
             Self::Forged => f.write_str("the receipt claims a grant the local replica never made"),
             Self::ConfigMismatch => f.write_str("the other state has another allotment"),
             Self::Diverged => {
@@ -235,45 +243,14 @@ impl core::fmt::Display for Refusal {
                 f.write_str("the adopted history leaves the local replica below zero")
             }
             Self::Overflow => f.write_str("a counter or the balance would pass u64::MAX"),
+            Self::Truncated => f.write_str("buffer too short"),
+            Self::WrongStructure => f.write_str("not an escrow frame"),
+            Self::WrongShape => f.write_str("the frame was written for another capacity"),
         }
     }
 }
 
 impl core::error::Error for Refusal {}
-
-/// A grow-only counter's answer to an increment or merge, in escrow's own
-/// vocabulary. Every counter here is a `GCounter<N>` holding only replica ids
-/// below `replicas <= N`, so it always has a slot, and every increment and
-/// merge is checked against `u64::MAX` first; the counter's refusal leaves it
-/// unchanged either way.
-pub(crate) fn counted(outcome: Result<(), merge_machines::Refusal>) -> Result<(), Refusal> {
-    use merge_machines::Refusal as Counter;
-    match outcome {
-        Ok(()) => Ok(()),
-        Err(Counter::Overflow) => Err(Refusal::Overflow),
-        Err(Counter::Full) => {
-            debug_assert!(
-                false,
-                "a counter over ids below replicas <= N always has a slot"
-            );
-            Err(Refusal::Overflow)
-        }
-        Err(
-            Counter::Exhausted
-            | Counter::Mismatch
-            | Counter::Truncated
-            | Counter::WrongStructure
-            | Counter::WrongShape
-            | Counter::Malformed,
-        ) => {
-            debug_assert!(
-                false,
-                "a counter increment or merge answers only Full or Overflow"
-            );
-            Err(Refusal::Overflow)
-        }
-    }
-}
 
 /// Why an escrow could not be built.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,13 +286,13 @@ pub enum ConfigError {
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Escrow<const N: usize> {
-    local: usize,
+    local: Member<N>,
     replicas: usize,
     allotted: [u64; N],
-    spent: GCounter<N>,
-    refunded: GCounter<N>,
+    spent: Tally<N>,
+    refunded: Tally<N>,
     /// `grants[from]` counts, per receiving replica, what `from` gave away.
-    grants: [GCounter<N>; N],
+    grants: [Tally<N>; N],
     /// `marks[from][to]` is the latest transfer `from` made to `to`.
     marks: [[Option<Mark>; N]; N],
 }
@@ -342,6 +319,7 @@ impl<const N: usize> Escrow<N> {
         let local = usize::try_from(local)
             .ok()
             .filter(|index| *index < allotted.len())
+            .and_then(Member::new)
             .ok_or(ConfigError::UnknownReplica)?;
         allotted
             .iter()
@@ -355,9 +333,9 @@ impl<const N: usize> Escrow<N> {
             local,
             replicas: allotted.len(),
             allotted: shares,
-            spent: GCounter::new(),
-            refunded: GCounter::new(),
-            grants: [GCounter::new(); N],
+            spent: Tally::new(),
+            refunded: Tally::new(),
+            grants: [Tally::new(); N],
             marks: [[None; N]; N],
         })
     }
@@ -365,7 +343,7 @@ impl<const N: usize> Escrow<N> {
     /// The replica this view belongs to.
     #[must_use]
     pub const fn local(&self) -> ReplicaId {
-        self.local as ReplicaId
+        self.local.id()
     }
 
     /// How many replicas share the supply.
@@ -385,7 +363,7 @@ impl<const N: usize> Escrow<N> {
     /// The rights `replica` started with.
     #[must_use]
     pub fn allotted(&self, replica: ReplicaId) -> Option<u64> {
-        self.index(replica).map(|index| self.allotted[index])
+        self.index(replica).map(|member| *member.of(&self.allotted))
     }
 
     /// The rights the local replica holds and may spend or transfer now.
@@ -399,64 +377,73 @@ impl<const N: usize> Escrow<N> {
     /// that replica pass on rights whose arrival it has not seen yet.
     #[must_use]
     pub fn balance(&self, replica: ReplicaId) -> Option<i128> {
-        self.index(replica).map(|index| self.signed_balance(index))
+        self.index(replica)
+            .map(|member| self.signed_balance(member))
     }
 
     /// Everything `replica` has spent, as far as this view knows.
     #[must_use]
     pub fn spent(&self, replica: ReplicaId) -> Option<u64> {
-        self.index(replica).map(|_| self.spent.count(replica))
+        self.index(replica).map(|member| self.spent.count(member))
     }
 
     /// Everything `replica` has refunded, as far as this view knows.
     #[must_use]
     pub fn refunded(&self, replica: ReplicaId) -> Option<u64> {
-        self.index(replica).map(|_| self.refunded.count(replica))
+        self.index(replica)
+            .map(|member| self.refunded.count(member))
     }
 
     /// What `replica` has spent and not refunded, as far as this view knows.
     #[must_use]
     pub fn outstanding(&self, replica: ReplicaId) -> Option<u64> {
-        self.index(replica).map(|_| {
-            self.spent
-                .count(replica)
-                .saturating_sub(self.refunded.count(replica))
-        })
+        self.index(replica)
+            .map(|member| self.outstanding_of(member))
     }
 
     /// Everything `from` has granted `to`, as far as this view knows.
     #[must_use]
     pub fn granted(&self, from: ReplicaId, to: ReplicaId) -> Option<u64> {
-        let from = self.index(from)?;
-        self.index(to).map(|_| self.grants[from].count(to))
+        let (from, to) = (self.index(from)?, self.index(to)?);
+        Some(from.of(&self.grants).count(to))
     }
 
     /// The latest transfer `from` made to `to`, as far as this view knows.
     #[must_use]
     pub fn last_transfer(&self, from: ReplicaId, to: ReplicaId) -> Option<Mark> {
-        self.marks[self.index(from)?][self.index(to)?]
+        let (from, to) = (self.index(from)?, self.index(to)?);
+        *to.of(from.of(&self.marks))
     }
 
     /// Where `replica` sits in the tables, if it is one of the replicas.
-    fn index(&self, replica: ReplicaId) -> Option<usize> {
+    fn index(&self, replica: ReplicaId) -> Option<Member<N>> {
         usize::try_from(replica)
             .ok()
             .filter(|index| *index < self.replicas)
+            .and_then(Member::new)
+    }
+
+    /// What `member` has spent and not refunded.
+    const fn outstanding_of(&self, member: Member<N>) -> u64 {
+        self.spent
+            .count(member)
+            .saturating_sub(self.refunded.count(member))
     }
 
     /// Allotment plus grants received, minus grants made and net spends.
-    fn signed_balance(&self, index: usize) -> i128 {
-        let replica = index as ReplicaId;
+    ///
+    /// No overflow: each term is at most `u64::MAX` and there are fewer than
+    /// `2 * N + 3` of them, far inside `i128`.
+    fn signed_balance(&self, member: Member<N>) -> i128 {
         let received: i128 = self
             .grants
             .iter()
-            .map(|row| i128::from(row.count(replica)))
+            .map(|row| i128::from(row.count(member)))
             .sum();
-        let given: i128 = self.grants[index]
-            .entries()
-            .map(|entry| i128::from(entry.count))
-            .sum();
-        i128::from(self.allotted[index]) + received - given - i128::from(self.spent.count(replica))
-            + i128::from(self.refunded.count(replica))
+        let given = member.of(&self.grants).total();
+        i128::from(*member.of(&self.allotted)) + received
+            - given
+            - i128::from(self.spent.count(member))
+            + i128::from(self.refunded.count(member))
     }
 }

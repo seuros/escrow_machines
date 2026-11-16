@@ -238,14 +238,14 @@ fn frames_round_trip_and_reject_what_no_history_could_produce() {
     assert_eq!(left.encode(&mut frame), Ok(Ship::ENCODED_LEN));
     assert_eq!(Ship::decode(&frame), Ok(left));
     let frame = &frame[..Ship::ENCODED_LEN];
-    assert_eq!(left.encode(&mut [0; 10]), Err(FrameError::Truncated));
+    assert_eq!(left.encode(&mut [0; 10]), Err(Refusal::Truncated));
     assert_eq!(
         Ship::decode(&frame[..frame.len() - 1]),
-        Err(FrameError::Truncated)
+        Err(Refusal::Truncated)
     );
-    assert_eq!(Ship::decode(&[]), Err(FrameError::Truncated));
-    assert_eq!(Escrow::<3>::decode(frame), Err(FrameError::Shape));
-    assert_eq!(Escrow::<5>::decode(frame), Err(FrameError::Truncated));
+    assert_eq!(Ship::decode(&[]), Err(Refusal::Truncated));
+    assert_eq!(Escrow::<3>::decode(frame), Err(Refusal::WrongShape));
+    assert_eq!(Escrow::<5>::decode(frame), Err(Refusal::Truncated));
 
     let patched = |at: usize, byte: u8| {
         let mut copy = [0_u8; Ship::ENCODED_LEN];
@@ -253,18 +253,70 @@ fn frames_round_trip_and_reject_what_no_history_could_produce() {
         copy[at] = byte;
         Ship::decode(&copy)
     };
-    assert_eq!(patched(0, 0x61), Err(FrameError::Tag));
-    assert_eq!(patched(3, 0), Err(FrameError::Corrupt)); // no replicas
-    assert_eq!(patched(3, 5), Err(FrameError::Corrupt)); // more than capacity
-    assert_eq!(patched(5, 3), Err(FrameError::Corrupt)); // local not a replica
-    assert_eq!(patched(7, 3), Err(FrameError::Corrupt)); // allotment below what was spent
-    assert_eq!(patched(7 + 3 * 8, 1), Err(FrameError::Corrupt)); // allotment for nobody
-    assert_eq!(patched(7 + 4 * 8, 0x62), Err(FrameError::Corrupt)); // not a counter
+    assert_eq!(patched(0, 0x61), Err(Refusal::WrongStructure));
+    // The tag of the frames that embedded merge-machines counter frames.
+    assert_eq!(patched(0, 0xE5), Err(Refusal::WrongStructure));
+    assert_eq!(patched(3, 0), Err(Refusal::Malformed)); // no replicas
+    assert_eq!(patched(3, 5), Err(Refusal::Malformed)); // more than capacity
+    assert_eq!(patched(5, 3), Err(Refusal::Malformed)); // local not a replica
+    assert_eq!(patched(5, 4), Err(Refusal::Malformed)); // local past the capacity
+    assert_eq!(patched(7, 3), Err(Refusal::Malformed)); // allotment below what was spent
+    assert_eq!(patched(7 + 3 * 8, 1), Err(Refusal::Malformed)); // allotment for nobody
+    // Four 8-byte tallies after the allotment: spent, refunded, then a row
+    // of grants per replica.
+    let tally = |nth: usize| 7 + 4 * 8 + nth * 4 * 8;
+    let (spent, refunded, grants) = (tally(0), tally(1), tally(2));
+    assert_eq!(patched(spent + 3 * 8, 1), Err(Refusal::Malformed)); // spent by nobody
+    assert_eq!(patched(refunded + 3 * 8, 1), Err(Refusal::Malformed)); // refunded by nobody
+    assert_eq!(patched(refunded, 4), Err(Refusal::Malformed)); // refunded above spent
+    assert_eq!(patched(grants + 3 * 4 * 8 + 8, 1), Err(Refusal::Malformed)); // granted by nobody
+    assert_eq!(patched(grants + 4 * 8 + 3 * 8, 1), Err(Refusal::Malformed)); // to nobody
+    assert_eq!(patched(grants + 4 * 8, 1), Err(Refusal::Malformed)); // grant with no mark
     let last_mark = Ship::ENCODED_LEN - 17;
-    assert_eq!(patched(last_mark, 2), Err(FrameError::Corrupt));
-    assert_eq!(patched(last_mark, 1), Err(FrameError::Corrupt)); // mark without a grant
-    assert_eq!(patched(last_mark + 1, 1), Err(FrameError::Corrupt));
-    assert_eq!(FrameError::Corrupt.to_string(), "impossible state");
+    assert_eq!(patched(last_mark, 2), Err(Refusal::Malformed));
+    assert_eq!(patched(last_mark, 1), Err(Refusal::Malformed)); // mark without a grant
+    assert_eq!(patched(last_mark + 1, 1), Err(Refusal::Malformed));
+    assert_eq!(
+        Refusal::Malformed.to_string(),
+        "the receipt or frame describes what no calls produce"
+    );
+
+    // Another replica's spend this view could have heard of: a sound frame.
+    let heard = patched(spent + 8, 1).expect("sound frame");
+    assert_eq!((heard.spent(1), heard.balance(1)), (Some(1), Some(4)));
+}
+
+#[test]
+fn the_last_replica_at_full_capacity_transfers_accepts_and_merges() {
+    let allotted = [1, 2, 3, 4];
+    let mut first = Ship::new(0, &allotted).expect("config");
+    let mut last = Ship::new(3, &allotted).expect("config");
+    let out = last.transfer(0, 1, 4).expect("transfer").receipt();
+    assert_eq!(out, receipt(3, 0, 1, 4, 4));
+    assert_eq!(first.accept(&out), Ok(Accepted::Applied));
+    assert_eq!((first.available(), last.available()), (5, 0));
+    let back = first.transfer(3, 1, 5).expect("transfer").receipt();
+    assert_eq!(last.accept(&back), Ok(Accepted::Applied));
+    assert_eq!(last.spend(5), Ok(0));
+    assert_eq!(last.refund(2), Ok(2));
+    first.merge(&last).expect("merge");
+    assert_eq!(
+        (
+            first.granted(3, 0),
+            first.granted(0, 3),
+            first.outstanding(3)
+        ),
+        (Some(4), Some(5), Some(3))
+    );
+    assert_eq!(first.last_transfer(3, 0), Mark::new(1, 4));
+    // The last replica's own cells, held by a peer and not by it, are a
+    // divergence, found at the edge of the table like anywhere else.
+    let mut amnesiac = Ship::new(3, &allotted).expect("config");
+    refuses(&mut amnesiac, Refusal::Diverged, |amnesiac| {
+        amnesiac.merge(&first)
+    });
+    assert_eq!(amnesiac.recover(&first), Ok(()));
+    assert_eq!(amnesiac.available(), 2);
 }
 
 #[test]

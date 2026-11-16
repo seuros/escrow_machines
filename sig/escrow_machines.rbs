@@ -102,4 +102,11 @@ module EscrowMachines
     def granted: (Integer from, Integer to) -> Integer?
     def last_transfer: (Integer from, Integer to) -> Mark?
   end
+
+  # Private native hooks each Data value's `initialize` validates through and
+  # stores the answer of.
+  private def self.__receipt: (Integer from, Integer to, Integer id, Integer amount, Integer total)
+                              -> [Integer, Integer, Integer, Integer, Integer]
+  private def self.__mark: (Integer id, Integer amount) -> [Integer, Integer]
+  private def self.__transfer: (Receipt receipt) -> Receipt
 end

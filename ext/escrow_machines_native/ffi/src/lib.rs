@@ -6,7 +6,8 @@ use init::classes;
 use escrow_machines::{Accepted, ConfigError, Escrow, Mark, Receipt, Refusal, Transfer};
 use magnus::{Error, RString, Ruby, Symbol, Value, prelude::*, typed_data::Obj};
 use matryona_machines::ruby::{
-    SymbolNames, bytes, exact_array, exact_fields, exact_typed_with, integer, keep, symbol,
+    SymbolNames, bytes_with, class_name, exact_array, exact_fields, exact_typed_with, integer,
+    keep, symbol,
 };
 use std::cell::RefCell;
 
@@ -32,6 +33,9 @@ matryona_machines::symbols! {
         Diverged => "diverged",
         Overdrawn => "overdrawn",
         Overflow => "overflow",
+        Truncated => "truncated",
+        WrongStructure => "wrong_structure",
+        WrongShape => "wrong_shape",
     }
 }
 
@@ -129,7 +133,7 @@ impl Wrapper {
         exact_typed_with(ruby, other, class, || {
             format!(
                 "other must be an EscrowMachines::Escrow, not {}",
-                other.class()
+                class_name(other)
             )
         })
     }
@@ -160,11 +164,13 @@ impl Wrapper {
     }
 
     fn decode(ruby: &Ruby, frame: Value) -> Result<Self, Error> {
-        let frame = bytes(frame, "bytes")?;
-        let core = Core::decode(&frame).map_err(|error| {
+        let frame = bytes_with(frame, || {
+            format!("bytes must be a String, not {}", class_name(frame))
+        })?;
+        let core = Core::decode(&frame).map_err(|refused| {
             Error::new(
                 ruby.exception_range_error(),
-                format!("not a decodable escrow frame: {error}"),
+                format!("the frame is refused: {}", Refusals::name(&refused)),
             )
         })?;
         Ok(Self {

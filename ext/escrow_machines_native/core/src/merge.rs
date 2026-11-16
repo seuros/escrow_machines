@@ -1,7 +1,7 @@
 //! Joining two replicas' views.
 
-use crate::{Escrow, Refusal, counted};
-use merge_machines::{Merge, ReplicaId};
+use crate::{Escrow, Refusal};
+use merge_machines::Merge;
 
 impl<const N: usize> Escrow<N> {
     /// Folds another replica's view into this one. Commutative, associative
@@ -47,10 +47,10 @@ impl<const N: usize> Escrow<N> {
             return Err(Refusal::Diverged);
         }
         let mut next = *self;
-        counted(next.spent.merge(&other.spent))?;
-        counted(next.refunded.merge(&other.refunded))?;
+        next.spent.join(&other.spent);
+        next.refunded.join(&other.refunded);
         for (mine, theirs) in next.grants.iter_mut().zip(&other.grants) {
-            counted(mine.merge(theirs))?;
+            mine.join(theirs);
         }
         let pairs = next.marks.iter_mut().zip(&other.marks);
         for (mine, theirs) in pairs.flat_map(|(mine, theirs)| mine.iter_mut().zip(theirs)) {
@@ -75,14 +75,19 @@ impl<const N: usize> Escrow<N> {
 
     /// Whether `other` holds more in the cells only the local replica writes.
     fn outrun_by(&self, other: &Self) -> bool {
-        let local = self.local();
-        let row = self.local;
+        let local = self.local;
+        let ahead = |mine: &[u64], theirs: &[u64]| theirs.iter().zip(mine).any(|(t, m)| t > m);
         other.spent.count(local) > self.spent.count(local)
             || other.refunded.count(local) > self.refunded.count(local)
-            || (0..self.replicas).any(|to| {
-                other.grants[row].count(to as ReplicaId) > self.grants[row].count(to as ReplicaId)
-                    || other.marks[row][to] > self.marks[row][to]
-            })
+            || ahead(
+                local.of(&self.grants).counts(),
+                local.of(&other.grants).counts(),
+            )
+            || local
+                .of(&self.marks)
+                .iter()
+                .zip(local.of(&other.marks))
+                .any(|(mine, theirs)| theirs > mine)
     }
 }
 

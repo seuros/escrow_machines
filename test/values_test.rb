@@ -113,13 +113,17 @@ class ValuesTest < Minitest::Test
     assert_raises(TypeError) { left.recover(Receipt.new(0, 1, 3, 4, 4)) }
   end
 
-  # A refused partner's TypeError names the class it got.
+  # A refused partner's TypeError names the class it got: the real class,
+  # never an opened singleton class.
   def test_a_refused_partner_names_the_class_received
     left = E.new(0, [10, 0])
     error = assert_raises(TypeError) { left.merge(Object.new) }
     assert_equal 'other must be an EscrowMachines::Escrow, not Object', error.message
     error = assert_raises(TypeError) { left.recover(Receipt.new(0, 1, 3, 4, 4)) }
     assert_equal 'other must be an EscrowMachines::Escrow, not EscrowMachines::Receipt', error.message
+    opened = Object.new.tap { |o| def o.opened = true }
+    error = assert_raises(TypeError) { left.merge(opened) }
+    assert_equal 'other must be an EscrowMachines::Escrow, not Object', error.message
   end
 
   # Sealing stops accidents, not reflection: Ruby binds a named subclass's
@@ -206,16 +210,26 @@ class ValuesTest < Minitest::Test
 
   private
 
-  # Runs the block with each reader of `value` redefined, then restores it.
+  # Runs the block with each reader of `value` named in `bodies` replaced by
+  # its body, then restores the originals.
   def readers(value, **bodies)
-    bodies.each_key { |name| value.alias_method(:"__original_#{name}", name) }
-    bodies.each { |name, body| value.define_method(name, &body) }
+    originals = bodies.to_h { |name, _| [name, value.instance_method(name)] }
+    bodies.each { |name, body| replace_method(value, name, body) }
     yield
   ensure
-    bodies.each_key do |name|
-      value.alias_method(name, :"__original_#{name}")
-      value.remove_method(:"__original_#{name}")
-    end
+    originals&.each { |name, method| replace_method(value, name, (method if method.owner == value)) }
+  end
+
+  # Defines `name` on `klass` as `body` (removes it when `body` is nil),
+  # removing the method `klass` itself holds first. Ruby warns about the
+  # redefinition, deliberate here, so warnings are off for the swap alone.
+  def replace_method(klass, name, body)
+    verbose = $VERBOSE
+    $VERBOSE = nil
+    klass.remove_method(name) if klass.method_defined?(name, false) || klass.private_method_defined?(name, false)
+    klass.define_method(name, body) if body
+  ensure
+    $VERBOSE = verbose
   end
 
   def redefining(klass, body)

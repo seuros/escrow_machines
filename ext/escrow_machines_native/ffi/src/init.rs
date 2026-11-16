@@ -2,7 +2,7 @@
 //! checks, resolved once here so no call looks a constant up by name.
 use crate::{CAPACITY, Core, Wrapper, checked_mark, checked_receipt, checked_transfer};
 use magnus::{Error, RClass, RModule, Ruby, function, method, prelude::*};
-use matryona_machines::ruby::{Class, Registry};
+use matryona_machines::ruby::Class;
 
 /// The value classes `lib/escrow_machines.rb` defines before this loads.
 pub struct Classes {
@@ -13,11 +13,10 @@ pub struct Classes {
     pub escrow: Class,
 }
 
-static CLASSES: Registry<Classes> = Registry::new("escrow_machines");
-
-/// The classes resolved at init.
-pub fn classes(ruby: &Ruby) -> Result<&'static Classes, Error> {
-    CLASSES.get(ruby)
+matryona_machines::registry! {
+    static CLASSES: Classes = "escrow_machines";
+    /// The classes resolved at init.
+    pub fn classes;
 }
 
 /// Resolves and pins the value classes, and pins `escrow`, which init

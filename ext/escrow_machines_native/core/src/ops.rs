@@ -1,20 +1,6 @@
 //! What a replica does with its own rights: spend, refund, transfer, accept.
 
-use crate::{Accepted, Escrow, Mark, Receipt, Refusal, Transfer, counted};
-use merge_machines::{GCounter, ReplicaId};
-
-/// Raises `replica`'s count by `amount`, checked against [`u64::MAX`] first.
-fn count_up<const N: usize>(
-    counter: &mut GCounter<N>,
-    replica: ReplicaId,
-    amount: u64,
-) -> Result<(), Refusal> {
-    counter
-        .count(replica)
-        .checked_add(amount)
-        .ok_or(Refusal::Overflow)?;
-    counted(counter.increment(replica, amount))
-}
+use crate::{Accepted, Escrow, Mark, Receipt, Refusal, ReplicaId, Transfer};
 
 impl<const N: usize> Escrow<N> {
     /// Spends `amount` of the local replica's rights and returns what it has
@@ -31,12 +17,11 @@ impl<const N: usize> Escrow<N> {
             return Err(Refusal::ZeroAmount);
         }
         let available = self.available();
-        if amount > available {
-            return Err(Refusal::Insufficient { available });
-        }
-        let local = self.local();
-        count_up(&mut self.spent, local, amount)?;
-        Ok(available - amount)
+        let left = available
+            .checked_sub(amount)
+            .ok_or(Refusal::Insufficient { available })?;
+        self.spent.raise(self.local, amount)?;
+        Ok(left)
     }
 
     /// Returns `amount` of the local replica's own spends to its balance and
@@ -52,15 +37,11 @@ impl<const N: usize> Escrow<N> {
         if amount == 0 {
             return Err(Refusal::ZeroAmount);
         }
-        let local = self.local();
-        let outstanding = self
-            .spent
-            .count(local)
-            .saturating_sub(self.refunded.count(local));
+        let outstanding = self.outstanding_of(self.local);
         if amount > outstanding {
             return Err(Refusal::ExceedsSpent { outstanding });
         }
-        count_up(&mut self.refunded, local, amount)?;
+        self.refunded.raise(self.local, amount)?;
         Ok(self.available())
     }
 
@@ -88,8 +69,11 @@ impl<const N: usize> Escrow<N> {
             return Err(Refusal::SelfTransfer);
         }
         let from = self.local();
-        let granted = self.grants[self.local].count(to);
-        if let Some(mark) = self.marks[self.local][slot] {
+        let available = self.available();
+        let row = self.local.of_mut(&mut self.grants);
+        let mark_cell = slot.of_mut(self.local.of_mut(&mut self.marks));
+        let granted = row.count(slot);
+        if let Some(mark) = *mark_cell {
             if id < mark.id {
                 return Err(Refusal::StaleId { latest: mark.id });
             }
@@ -108,13 +92,11 @@ impl<const N: usize> Escrow<N> {
                 }));
             }
         }
-        let available = self.available();
         if amount > available {
             return Err(Refusal::Insufficient { available });
         }
-        let total = granted.checked_add(amount).ok_or(Refusal::Overflow)?;
-        counted(self.grants[self.local].increment(to, amount))?;
-        self.marks[self.local][slot] = Some(Mark { id, amount });
+        let total = row.raise(slot, amount)?;
+        *mark_cell = Some(Mark { id, amount });
         Ok(Transfer::Applied(Receipt {
             from,
             to,
@@ -141,8 +123,12 @@ impl<const N: usize> Escrow<N> {
     pub fn accept(&mut self, receipt: &Receipt) -> Result<Accepted, Refusal> {
         let from = self.index(receipt.from).ok_or(Refusal::UnknownReplica)?;
         let to = self.index(receipt.to).ok_or(Refusal::UnknownReplica)?;
-        let held = self.grants[from].count(receipt.to);
-        let known = self.marks[from][to];
+        let local = self.local;
+        let available = self.available();
+        let row = from.of_mut(&mut self.grants);
+        let mark_cell = to.of_mut(from.of_mut(&mut self.marks));
+        let held = row.count(to);
+        let known = *mark_cell;
         let fresh = match known {
             Some(mark) if receipt.id == mark.id => {
                 if receipt.amount != mark.amount {
@@ -166,7 +152,7 @@ impl<const N: usize> Escrow<N> {
         if !fresh {
             return Ok(Accepted::Replayed);
         }
-        if from == self.local {
+        if from == local {
             return Err(Refusal::Forged);
         }
         let raise = receipt
@@ -174,11 +160,11 @@ impl<const N: usize> Escrow<N> {
             .checked_sub(held)
             .filter(|raise| *raise >= receipt.amount)
             .ok_or(Refusal::Malformed)?;
-        if to == self.local && self.available().checked_add(raise).is_none() {
+        if to == local && available.checked_add(raise).is_none() {
             return Err(Refusal::Overflow);
         }
-        counted(self.grants[from].increment(receipt.to, raise))?;
-        self.marks[from][to] = Some(Mark {
+        row.raise(to, raise)?;
+        *mark_cell = Some(Mark {
             id: receipt.id,
             amount: receipt.amount,
         });

@@ -6,8 +6,11 @@ Gem::Specification.new do |spec|
   spec.version = EscrowMachines::VERSION
   spec.authors = ['Abdelkader Boudih']
   spec.email = ['oss@seuros.com']
-  spec.summary = 'Initial native bounded-counter escrow: conserved rights, local spends, replay-safe transfers'
-  spec.description = 'Unstable rights-accounting policy core, not a ledger, a transport, or durable storage.'
+  spec.summary = 'Bounded-counter escrow for Ruby: conserved rights, local spends, replay-safe transfers'
+  spec.description = 'A fixed set of replicas shares a fixed supply; each spends only from the rights it ' \
+                     'holds and moves rights by transfer, so merges in any order agree and the total spent ' \
+                     'never exceeds the supply. Bound to Ruby from the no_std escrow-machines crate: the ' \
+                     'accounting only, with the transport and durable storage left to the caller.'
   spec.homepage = 'https://github.com/seuros/escrow_machines'
   spec.license = 'MIT'
   spec.required_ruby_version = '>= 4.0.0'

@@ -143,22 +143,32 @@ class EscrowTest < Minitest::Test
     assert_equal frame, copy.encode
     assert_equal [0, 2, 6, 3, Mark.new(id: 2, amount: 1)],
                  [copy.local, copy.replicas, copy.available, copy.spent(0), copy.last_transfer(0, 1)]
-    assert_raises(RangeError) { E.decode(frame[0...-1]) }
-    assert_raises(RangeError) { E.decode("\x00#{frame[1..]}".b) }
-    assert_raises(RangeError) { E.decode('') }
+    patched = ->(at, byte) { frame.dup.tap { it.setbyte(at, byte) } }
+    { frame[0...-1] => 'truncated', '' => 'truncated', patched.(0, 0) => 'wrong_structure',
+      patched.(0, 0xE5) => 'wrong_structure', patched.(1, 4) => 'wrong_shape',
+      patched.(3, 0) => 'malformed' }.each do |bytes, name|
+      error = assert_raises(RangeError) { E.decode(bytes) }
+      assert_equal "the frame is refused: #{name}", error.message
+    end
     assert_raises(TypeError) { E.decode(nil) }
     assert_raises(TypeError) { E.decode(1) }
   end
 
   # A frame is exactly a String, read natively: a subclass and an object
   # answering `to_str` are refused, and a redefined `#bytes` is never run.
+  # The TypeError names the class received: the real class, never an opened
+  # singleton nor what a redefined `#class` claims.
   def test_decode_takes_exactly_a_string
     left, = fleet([10, 5])
     frame = left.encode
-    error = assert_raises(TypeError) { E.decode(Class.new(String).new(frame)) }
-    assert_equal 'bytes must be a String', error.message
+    subclass = Class.new(String).new(frame)
     stringly = Object.new.tap { |o| o.define_singleton_method(:to_str) { frame } }
-    assert_raises(TypeError) { E.decode(stringly) }
+    posing = Object.new.tap { |o| def o.class = String }
+    { subclass => subclass.class.to_s, stringly => 'Object', posing => 'Object',
+      frame: 'Symbol', 1 => 'Integer', nil => 'NilClass' }.each do |value, received|
+      error = assert_raises(TypeError) { E.decode(value) }
+      assert_equal "bytes must be a String, not #{received}", error.message
+    end
     lying = frame.dup.tap { |f| f.define_singleton_method(:bytes) { raise 'the binding ran #bytes' } }
     assert_equal frame, E.decode(lying).encode
   end

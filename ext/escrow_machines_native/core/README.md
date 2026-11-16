@@ -19,14 +19,19 @@ the cumulative grant, so `accept` is idempotent and order-insensitive. Every
 refusal is a `Refusal` value and leaves the state untouched; counters refuse at
 `u64::MAX` instead of wrapping.
 
-The counters are `merge-machines` `GCounter`s and `Escrow` implements its
-`Merge` trait. A counter's own refusal never reaches the caller: its
-`Overflow` becomes escrow's `Overflow`, and a counter frame it cannot read
-becomes `FrameError::Corrupt` (or `Truncated`). The answers escrow's
-invariants rule out (a `Full` counter, which cannot happen with at most `N`
-replica ids; any non-codec refusal from a decode) trip a `debug_assert!` in
-tests and answer the conservative `Overflow` / `Corrupt` with nothing changed. The escrow adds what a PN-counter lacks: writes are restricted to
-the local replica's own cells and bounded by its balance.
+`Escrow` implements the `merge-machines` `Merge` trait. Replica ids are
+dense, `0..replicas` with `replicas <= N`, so every per-replica table is a
+plain `[T; N]` read through a position that is below `N` by construction: a
+lookup cannot miss. The counters are such tables, one `u64` cell per replica
+joined by `max`, so raising one never needs a free slot and its only refusal
+is `Overflow`. Frame refusals are `Refusal` variants like every other
+(`Truncated`, `WrongStructure`, `WrongShape`, `Malformed`); there is no second
+error type. The frame stores each counter as `N` 64-bit fields; it leads with
+`0xE6`, and a frame from before (`0xE5`, which embedded `merge-machines`
+counter frames) is `WrongStructure`.
+
+The escrow adds what a PN-counter lacks: writes are restricted to the local
+replica's own cells and bounded by its balance.
 
 Contracts the caller owns:
 
@@ -56,4 +61,4 @@ validated through those constructors, and `Transfer` as one `Data` per
 variant, `Transfer::Applied` and `Transfer::Replayed`, each carrying the
 `receipt`.
 
-Initial, unstable API. No clock, I/O, hashing, or randomness.
+Pre-1.0: breaking changes land in minor versions. No clock, I/O, hashing, or randomness.
