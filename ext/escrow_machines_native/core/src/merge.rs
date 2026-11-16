@@ -1,6 +1,7 @@
 //! Joining two replicas' views.
 
-use crate::{Escrow, Refusal};
+use crate::{Escrow, Mark, Refusal};
+use core::cmp::Ordering;
 use merge_machines::Merge;
 
 impl<const N: usize> Escrow<N> {
@@ -13,7 +14,9 @@ impl<const N: usize> Escrow<N> {
     /// allotment. [`Refusal::Diverged`] when `other` records more spends,
     /// refunds or outgoing transfers for the local replica than the local
     /// replica remembers making (it lost state it had already shown to a peer),
-    /// or when the two views hold one transfer id with different amounts.
+    /// or when the two views disagree about a transfer: one id with another
+    /// amount or cumulative total, or a newer id whose total does not cover
+    /// the older one.
     /// [`Refusal::Overflow`] when the local balance would pass [`u64::MAX`].
     /// The state is untouched on refusal.
     pub fn merge(&mut self, other: &Self) -> Result<(), Refusal> {
@@ -31,7 +34,7 @@ impl<const N: usize> Escrow<N> {
     /// # Errors
     ///
     /// [`Refusal::ConfigMismatch`], [`Refusal::Diverged`] when the two views
-    /// hold one transfer id with different amounts, [`Refusal::Overdrawn`]
+    /// disagree about a transfer as in [`merge`](Self::merge), [`Refusal::Overdrawn`]
     /// when the adopted history shows the local replica gave away or spent
     /// more than it held, or [`Refusal::Overflow`]. The state is untouched on
     /// refusal.
@@ -46,6 +49,16 @@ impl<const N: usize> Escrow<N> {
         if strict && self.outrun_by(other) {
             return Err(Refusal::Diverged);
         }
+        let cells = (self.grants.iter().zip(&other.grants))
+            .flat_map(|(mine, theirs)| mine.counts().iter().zip(theirs.counts()));
+        let marks = (self.marks.iter().zip(&other.marks))
+            .flat_map(|(mine, theirs)| mine.iter().zip(theirs));
+        if !cells
+            .zip(marks)
+            .all(|((held, seen), (mine, theirs))| agree((*mine, *held), (*theirs, *seen)))
+        {
+            return Err(Refusal::Diverged);
+        }
         let mut next = *self;
         next.spent.join(&other.spent);
         next.refunded.join(&other.refunded);
@@ -54,12 +67,6 @@ impl<const N: usize> Escrow<N> {
         }
         let pairs = next.marks.iter_mut().zip(&other.marks);
         for (mine, theirs) in pairs.flat_map(|(mine, theirs)| mine.iter_mut().zip(theirs)) {
-            if let (Some(left), Some(right)) = (*mine, *theirs)
-                && left.id == right.id
-                && left.amount != right.amount
-            {
-                return Err(Refusal::Diverged);
-            }
             *mine = (*mine).max(*theirs);
         }
         let balance = next.signed_balance(next.local);
@@ -88,6 +95,29 @@ impl<const N: usize> Escrow<N> {
                 .iter()
                 .zip(local.of(&other.marks))
                 .any(|(mine, theirs)| theirs > mine)
+    }
+}
+
+/// Whether two views' knowledge of one `(from, to)` pair, each a latest mark
+/// and the cumulative grant it left, could come from one history.
+///
+/// A mark's grant cell is the cumulative total at that transfer. One id must
+/// carry one amount and one total; a newer id's total must cover the older
+/// total plus the newer amount, because ids strictly increase per pair.
+fn agree(left: (Option<Mark>, u64), right: (Option<Mark>, u64)) -> bool {
+    // A pair with no mark has no grant (`decode` checks it): nothing to
+    // contradict.
+    let ((Some(mine), held), (Some(theirs), seen)) = (left, right) else {
+        return true;
+    };
+    match mine.id.cmp(&theirs.id) {
+        Ordering::Equal => mine.amount == theirs.amount && held == seen,
+        Ordering::Less => seen
+            .checked_sub(theirs.amount)
+            .is_some_and(|before| held <= before),
+        Ordering::Greater => held
+            .checked_sub(mine.amount)
+            .is_some_and(|before| seen <= before),
     }
 }
 

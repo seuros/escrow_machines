@@ -31,8 +31,9 @@ impl<const N: usize> Escrow<N> {
     ///
     /// [`Refusal::ZeroAmount`], [`Refusal::ExceedsSpent`] when `amount` is more
     /// than the local replica has spent and not yet refunded (a refund never
-    /// mints), or [`Refusal::Overflow`] when the lifetime refunded counter is
-    /// exhausted. The state is untouched on refusal.
+    /// mints), or [`Refusal::Overflow`] when the local balance would pass
+    /// [`u64::MAX`] or the lifetime refunded counter is exhausted. The state
+    /// is untouched on refusal.
     pub fn refund(&mut self, amount: u64) -> Result<u64, Refusal> {
         if amount == 0 {
             return Err(Refusal::ZeroAmount);
@@ -41,8 +42,14 @@ impl<const N: usize> Escrow<N> {
         if amount > outstanding {
             return Err(Refusal::ExceedsSpent { outstanding });
         }
+        // Rights received after the spend can already fill the balance, so the
+        // refund is checked against it, not only against the counter.
+        let held = self
+            .available()
+            .checked_add(amount)
+            .ok_or(Refusal::Overflow)?;
         self.refunded.raise(self.local, amount)?;
-        Ok(self.available())
+        Ok(held)
     }
 
     /// Moves `amount` of the local replica's rights to `to` under transfer

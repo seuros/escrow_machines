@@ -185,6 +185,38 @@ class EscrowTest < Minitest::Test
     assert_equal :stale_id, right.transfer(0, 0, 1)
   end
 
+  def test_refund_past_u64_balance_is_refused_and_the_frame_still_decodes
+    # Bug: the refund answered 0 and left balance 2**64, so decode raised :malformed.
+    e = E.new(0, [1, 0])
+    e.spend(1)
+    assert_equal :applied, e.accept(Receipt.new(1, 0, 0, MAX, MAX))
+    assert_equal :overflow, e.refund(1)
+    assert_equal [MAX, MAX], [e.balance(0), e.available]
+    assert_equal MAX, E.decode(e.encode).available
+  end
+
+  def test_merge_refuses_one_transfer_id_with_another_total
+    # Bug: equal ids were compared by amount only, so the grant jumped 2 -> 5.
+    first = E.new(0, [10, 0]).transfer(1, 1, 2).receipt
+    forked = E.new(0, [10, 0])
+    forked.transfer(1, 0, 3)
+    conflict = forked.transfer(1, 1, 2).receipt
+    r = E.new(1, [10, 0])
+    assert_equal :applied, r.accept(first)
+    assert_equal :malformed, r.accept(conflict)
+    assert_equal :diverged, r.merge(forked)
+    assert_equal :diverged, r.recover(forked)
+    assert_equal [2, :replayed], [r.available, r.accept(first)]
+  end
+
+  def test_decode_refuses_spends_with_no_supply
+    # Bug: a zero-supply frame decoded with spent 1 and refunded 1.
+    frame = E.new(0, [0]).encode
+    frame[71, 8] = [1].pack('Q<')
+    frame[135, 8] = [1].pack('Q<')
+    assert_raises(RangeError) { E.decode(frame) }
+  end
+
   def test_validation
     [1.0, nil, '1', Float::NAN].each do |v|
       assert_raises(TypeError) { E.new(v, [1]) }

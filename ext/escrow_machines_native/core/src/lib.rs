@@ -203,7 +203,7 @@ pub enum Refusal {
     /// The other state was built for a different replica set or allotment.
     ConfigMismatch,
     /// The other state knows more about the local replica's own cells than the
-    /// local replica does, or two histories disagree about one transfer id.
+    /// local replica does, or two histories disagree about one transfer.
     Diverged,
     /// Adopting the other state would leave the local replica below zero.
     Overdrawn,
@@ -430,20 +430,24 @@ impl<const N: usize> Escrow<N> {
             .saturating_sub(self.refunded.count(member))
     }
 
-    /// Allotment plus grants received, minus grants made and net spends.
-    ///
-    /// No overflow: each term is at most `u64::MAX` and there are fewer than
-    /// `2 * N + 3` of them, far inside `i128`.
-    fn signed_balance(&self, member: Member<N>) -> i128 {
+    /// Allotment plus every grant `member` received, as far as this view
+    /// knows. At most `N + 1` terms of at most `u64::MAX`, far inside `i128`.
+    fn inflow(&self, member: Member<N>) -> i128 {
         let received: i128 = self
             .grants
             .iter()
             .map(|row| i128::from(row.count(member)))
             .sum();
-        let given = member.of(&self.grants).total();
         i128::from(*member.of(&self.allotted)) + received
-            - given
-            - i128::from(self.spent.count(member))
+    }
+
+    /// Allotment plus grants received, minus grants made and net spends.
+    ///
+    /// No overflow: each term is at most `u64::MAX` and there are fewer than
+    /// `2 * N + 3` of them, far inside `i128`.
+    fn signed_balance(&self, member: Member<N>) -> i128 {
+        let given = member.of(&self.grants).total();
+        self.inflow(member) - given - i128::from(self.spent.count(member))
             + i128::from(self.refunded.count(member))
     }
 }

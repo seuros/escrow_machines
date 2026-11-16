@@ -3,6 +3,12 @@ use super::{Ship, receipt};
 use crate::*;
 use matryona_machines::testing::{refuses, unchanged};
 
+/// Where the `nth` tally of a `Ship` frame starts: after the 7-byte header
+/// and the allotment come spent, refunded, then a row of grants per replica.
+const fn tally(nth: usize) -> usize {
+    7 + 4 * 8 + nth * 4 * 8
+}
+
 #[test]
 fn spends_stop_at_the_local_share_even_when_the_fleet_holds_more() {
     let mut left = Ship::new(0, &[10, 5]).expect("config");
@@ -262,9 +268,6 @@ fn frames_round_trip_and_reject_what_no_history_could_produce() {
     assert_eq!(patched(5, 4), Err(Refusal::Malformed)); // local past the capacity
     assert_eq!(patched(7, 3), Err(Refusal::Malformed)); // allotment below what was spent
     assert_eq!(patched(7 + 3 * 8, 1), Err(Refusal::Malformed)); // allotment for nobody
-    // Four 8-byte tallies after the allotment: spent, refunded, then a row
-    // of grants per replica.
-    let tally = |nth: usize| 7 + 4 * 8 + nth * 4 * 8;
     let (spent, refunded, grants) = (tally(0), tally(1), tally(2));
     assert_eq!(patched(spent + 3 * 8, 1), Err(Refusal::Malformed)); // spent by nobody
     assert_eq!(patched(refunded + 3 * 8, 1), Err(Refusal::Malformed)); // refunded by nobody
@@ -330,4 +333,70 @@ fn constructors_refuse_values_no_call_produces() {
     assert_eq!(Receipt::new(1, 1, 7, 4, 9), None);
     assert_eq!(Receipt::new(0, 1, 7, 0, 9), None);
     assert_eq!(Receipt::new(0, 1, 7, 10, 9), None);
+}
+
+#[test]
+fn a_refund_that_would_push_the_balance_past_u64_is_refused() {
+    // Bug: refund raised the balance to 2**64, available() hid it as 0 and the frame no longer decoded.
+    let mut local = Ship::new(0, &[1, 0]).expect("config");
+    assert_eq!(local.spend(1), Ok(0));
+    let full = receipt(1, 0, 0, u64::MAX, u64::MAX);
+    assert_eq!(local.accept(&full), Ok(Accepted::Applied));
+    assert_eq!(local.available(), u64::MAX);
+    refuses(&mut local, Refusal::Overflow, |local| local.refund(1));
+    assert_eq!(local.balance(0), Some(i128::from(u64::MAX)));
+    let mut frame = [0; Ship::ENCODED_LEN];
+    local.encode(&mut frame).expect("encode");
+    assert_eq!(Ship::decode(&frame), Ok(local));
+}
+
+#[test]
+fn merge_refuses_two_histories_with_one_id_and_different_totals() {
+    // Bug: equal transfer ids were compared by amount only, so a contradicting total merged in.
+    let mut honest = Ship::new(0, &[10, 0]).expect("config");
+    let first = honest.transfer(1, 1, 2).expect("transfer").receipt();
+    let mut forked = Ship::new(0, &[10, 0]).expect("config");
+    forked.transfer(1, 0, 3).expect("transfer");
+    let conflict = forked.transfer(1, 1, 2).expect("transfer").receipt();
+    let mut right = Ship::new(1, &[10, 0]).expect("config");
+    assert_eq!(right.accept(&first), Ok(Accepted::Applied));
+    assert_eq!(right.accept(&conflict), Err(Refusal::Malformed));
+    refuses(&mut right, Refusal::Diverged, |right| right.merge(&forked));
+    refuses(&mut right, Refusal::Diverged, |right| {
+        right.recover(&forked)
+    });
+    assert_eq!(right.available(), 2);
+    assert_eq!(right.accept(&first), Ok(Accepted::Replayed));
+
+    // An older id whose total the newer one does not cover diverges too.
+    let mut later = Ship::new(0, &[10, 0]).expect("config");
+    later.transfer(1, 0, 1).expect("transfer");
+    later.transfer(1, 2, 1).expect("transfer");
+    refuses(&mut right, Refusal::Diverged, |right| right.merge(&later));
+    let mut behind = later;
+    refuses(&mut behind, Refusal::Diverged, |behind| {
+        behind.merge(&right)
+    });
+}
+
+#[test]
+fn frames_with_spends_no_held_right_could_pay_for_are_malformed() {
+    // Bug: a zero-supply frame decoded with spent 1 and refunded 1, a history no calls produce.
+    let empty = Escrow::<4>::new(0, &[0]).expect("config");
+    let mut frame = [0_u8; Ship::ENCODED_LEN];
+    empty.encode(&mut frame).expect("encode");
+    frame[tally(0)] = 1;
+    frame[tally(1)] = 1;
+    assert_eq!(Ship::decode(&frame), Err(Refusal::Malformed));
+
+    // Outstanding spends past everything a replica ever held are impossible
+    // for another replica too, even when this view's estimate of it is stale.
+    let left = Ship::new(0, &[3, 2]).expect("config");
+    left.encode(&mut frame).expect("encode");
+    let peer_spent = tally(0) + 8;
+    frame[peer_spent] = 3;
+    assert_eq!(Ship::decode(&frame), Err(Refusal::Malformed));
+    frame[tally(1) + 8] = 1;
+    let heard = Ship::decode(&frame).expect("sound frame");
+    assert_eq!(heard.outstanding(1), Some(2));
 }

@@ -185,12 +185,9 @@ impl<const N: usize> Escrow<N> {
             && self.allotted.iter().skip(self.replicas).all(|s| *s == 0)
             && self.spent.zero_from(self.replicas)
             && self.refunded.zero_from(self.replicas)
-            && self
-                .refunded
-                .counts()
-                .iter()
-                .zip(self.spent.counts())
-                .all(|(refunded, spent)| refunded <= spent)
+            && (0..self.replicas)
+                .filter_map(Member::new)
+                .all(|member| self.spends_paid_for(member))
             && self
                 .grants
                 .iter()
@@ -198,6 +195,30 @@ impl<const N: usize> Escrow<N> {
                 .enumerate()
                 .all(|(from, (row, marks))| self.sound_row(from, row, marks))
             && (0..=i128::from(u64::MAX)).contains(&self.signed_balance(self.local))
+    }
+
+    /// Whether `member`'s spent and refunded counters are ones its calls could
+    /// have reached, given its inflow: its allotment plus every grant this view
+    /// knows it received.
+    ///
+    /// A replica spends only rights it holds, and refunds only its own spends,
+    /// so in its own history `spent - refunded <= inflow - given`, and nothing
+    /// was ever spent while the inflow was zero. Another view holds counters
+    /// joined from several of its versions, which may pair its latest spent
+    /// with a later outgoing grant, so `given` drops out; but the version that
+    /// carried the spent counter also carried its refunds and received grants,
+    /// and joins only raise those. What survives every join is exact: any
+    /// counters with `refunded <= spent`, `spent - refunded <= inflow` and
+    /// `spent == 0` when `inflow == 0` are reached by cycling spend 1 and
+    /// refund 1, then spending the rest. The local balance check covers
+    /// `given` for the local replica.
+    fn spends_paid_for(&self, member: Member<N>) -> bool {
+        let (spent, refunded) = (self.spent.count(member), self.refunded.count(member));
+        let inflow = self.inflow(member);
+        spent
+            .checked_sub(refunded)
+            .is_some_and(|outstanding| i128::from(outstanding) <= inflow)
+            && (spent == 0 || inflow > 0)
     }
 
     /// Whether row `from` grants only to other known replicas, and every

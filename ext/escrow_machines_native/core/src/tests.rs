@@ -2,6 +2,7 @@ use super::*;
 use matryona_machines::testing::XorShift64 as Draws;
 
 mod edges;
+mod reachable;
 
 type Ship = Escrow<4>;
 
@@ -209,16 +210,28 @@ fn check(fleet: &[Ship], model: &Model, supply: u64) {
     assert!(outstanding <= u128::from(supply));
 }
 
+/// One fresh view per replica of `allotted`.
+fn fleet_of(allotted: &[u64]) -> Vec<Ship> {
+    (0..allotted.len())
+        .map(|local| Ship::new(local as ReplicaId, allotted).expect("config"))
+        .collect()
+}
+
+/// Encodes `ship` and decodes it back to itself: `decode` accepts it.
+fn round_trips(ship: &Ship) {
+    let mut frame = [0; Ship::ENCODED_LEN];
+    assert_eq!(ship.encode(&mut frame), Ok(Ship::ENCODED_LEN));
+    assert_eq!(Ship::decode(&frame), Ok(*ship));
+}
+
 fn run(seed: u64, allotted: &[u64], steps: usize) -> Vec<Ship> {
     let mut draws = Draws::new(seed);
     let replicas = allotted.len();
     let supply: u64 = allotted.iter().sum();
     let mut model = Model::new(allotted);
-    let mut fleet: Vec<Ship> = (0..replicas)
-        .map(|local| Ship::new(local as ReplicaId, allotted).expect("config"))
-        .collect();
+    let mut fleet = fleet_of(allotted);
     let mut next_id = vec![vec![1_u64; 5]; replicas];
-    for step in 0..steps {
+    for _ in 0..steps {
         let replica = pick(&mut draws, replicas);
         let before = fleet[replica];
         let amount = draws.below(supply / 2 + 2);
@@ -282,11 +295,7 @@ fn run(seed: u64, allotted: &[u64], steps: usize) -> Vec<Ship> {
             assert_ne!(cells(&fleet[replica]), cells(&before));
         }
         check(&fleet, &model, supply);
-        if step % 16 == 0 {
-            let mut frame = [0; Ship::ENCODED_LEN];
-            assert_eq!(fleet[replica].encode(&mut frame), Ok(Ship::ENCODED_LEN));
-            assert_eq!(Ship::decode(&frame), Ok(fleet[replica]));
-        }
+        round_trips(&fleet[replica]);
     }
     // Full gossip: nothing stays in flight and every view agrees.
     for _ in 0..2 {
