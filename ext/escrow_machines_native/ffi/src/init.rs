@@ -20,7 +20,9 @@ matryona_machines::registry! {
 }
 
 /// Resolves and pins the value classes, and pins `escrow`, which init
-/// defined. Called once, from init.
+/// defined, fixing magnus's class for `Wrapper` to it: building an escrow
+/// never runs `Object.const_get`. Called once, from init, after the escrow's
+/// methods are defined.
 fn resolve(ruby: &Ruby, module: RModule, escrow: RClass) -> Result<(), Error> {
     let transfer: RModule = module.const_get("Transfer")?;
     let classes = Classes {
@@ -28,7 +30,7 @@ fn resolve(ruby: &Ruby, module: RModule, escrow: RClass) -> Result<(), Error> {
         applied: Class::resolve(ruby, transfer, "Applied")?,
         replayed: Class::resolve(ruby, transfer, "Replayed")?,
         mark: Class::resolve(ruby, module, "Mark")?,
-        escrow: Class::pin(ruby, escrow),
+        escrow: Class::pin_wrapped::<Wrapper>(ruby, escrow)?,
     };
     CLASSES.set(ruby, classes).map(drop)
 }
@@ -42,7 +44,6 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     module.define_singleton_method("__transfer", function!(checked_transfer, 1))?;
     let class = module.define_class("Escrow", ruby.class_object())?;
     class.undef_default_alloc_func();
-    resolve(ruby, module, class)?;
     class.const_set("ENCODED_LEN", Core::ENCODED_LEN)?;
     class.define_singleton_method("new", function!(Wrapper::new, 2))?;
     class.define_singleton_method("decode", function!(Wrapper::decode, 1))?;
@@ -65,5 +66,5 @@ fn init(ruby: &Ruby) -> Result<(), Error> {
     class.define_method("outstanding", method!(Wrapper::outstanding, 1))?;
     class.define_method("granted", method!(Wrapper::granted, 2))?;
     class.define_method("last_transfer", method!(Wrapper::last_transfer, 2))?;
-    Ok(())
+    resolve(ruby, module, class)
 }
