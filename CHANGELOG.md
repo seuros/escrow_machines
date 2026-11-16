@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.7.0...escrow_machines/v0.7.1) (2026-11-16)
+
+
+### Bug Fixes
+
+* refuse merges that disagree on a transfer's cumulative total ([cbcafa5](https://github.com/seuros/escrow_machines/commit/cbcafa54cbb866a9f5c425dbcbbad90b09694f6e))
+
 ## [0.7.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.6.0...escrow_machines/v0.7.0) (2026-11-16)
 
 
