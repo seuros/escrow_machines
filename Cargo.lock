@@ -75,7 +75,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "escrow-machines"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "matryona-machines",
  "merge-machines",
@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "escrow_machines_native"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "escrow-machines",
  "magnus",

@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.6.0...escrow_machines/v0.7.0) (2026-11-16)
+
+
+### ⚠ BREAKING CHANGES
+
+* fold FrameError into Refusal, new 0xE6 frame of plain tallies
+
+### Features
+
+* fold FrameError into Refusal, new 0xE6 frame of plain tallies ([04c0d32](https://github.com/seuros/escrow_machines/commit/04c0d32b6be44d1fdff8a3cec23cd39fbbf54233))
+
 ## [0.6.0](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.5.0...escrow_machines/v0.6.0) (2026-11-14)
 
 
