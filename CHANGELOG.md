@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.7.1...escrow_machines/v0.7.2) (2026-11-16)
+
+
+### Bug Fixes
+
+* fix wrapped classes at load so building a value runs no Ruby ([3e0238a](https://github.com/seuros/escrow_machines/commit/3e0238a43954f3fe90537ac42df5c48cd77868c5))
+
 ## [0.7.1](https://github.com/seuros/escrow_machines/compare/escrow_machines/v0.7.0...escrow_machines/v0.7.1) (2026-11-16)
 
 
